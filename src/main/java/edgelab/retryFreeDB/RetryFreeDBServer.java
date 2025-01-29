@@ -34,7 +34,7 @@ import java.util.concurrent.atomic.AtomicLong;
 public class RetryFreeDBServer {
     private final Server server;
     private final int port;
-    public RetryFreeDBServer(int port, ServerBuilder<?> serverBuilder,String postgresAddress, String postgresPort, String[] tables) throws SQLException {
+    public RetryFreeDBServer(int port, ServerBuilder<?> serverBuilder,String postgresAddress, String postgresPort, String[] tables) throws Exception {
         this.server = serverBuilder
                 .maxInboundMessageSize(Integer.MAX_VALUE)
                 .addService(new RetryFreeDBService(postgresAddress, postgresPort, tables))
@@ -42,7 +42,7 @@ public class RetryFreeDBServer {
         this.port = port;
     }
 
-    public static void main(String[] args) throws IOException, InterruptedException, SQLException {
+    public static void main(String[] args) throws IOException, InterruptedException, Exception {
         int port = Integer.parseInt(args[0]);
         String postgresAddress = args[1];
         String postgresPort = args[2];
@@ -73,7 +73,7 @@ public class RetryFreeDBServer {
         Set<DBTransaction> toBeAbortedTransactions = ConcurrentHashMap.newKeySet();
         ConcurrentHashMap<String, AtomicInteger> lastIdUsed = new ConcurrentHashMap<>();
         private final AtomicLong lastTransactionId;
-        public RetryFreeDBService(String postgresAddress, String postgresPort, String[] tables) throws SQLException {
+        public RetryFreeDBService(String postgresAddress, String postgresPort, String[] tables) throws Exception {
             repo = new ConcurrencyControl(postgresAddress, postgresPort);
             transactions = new ConcurrentHashMap<>();
             lastTransactionId =  new AtomicLong(0);
@@ -94,10 +94,11 @@ public class RetryFreeDBServer {
             try  {
                 long startTime = System.currentTimeMillis();
 
-                Connection conn = repo.connect();
-                conn.setAutoCommit(false);
+
                 long transactionId = lastTransactionId.incrementAndGet();
-                DBTransaction transaction = new DBTransaction(Long.toString(transactionId), conn);
+                DBTransaction transaction = new DBTransaction(Long.toString(transactionId));
+                repo.initTransaction(transaction);
+
                 transactions.put(Long.toString(transactionId), transaction);
 
                 transaction.finishInitiation(startTime);
@@ -350,7 +351,7 @@ public class RetryFreeDBServer {
                 responseObserver.onNext(Result.newBuilder().setStatus(finalStatus)
                         .putReturns("waiting_time", String.valueOf(tx.getWaitingTime())).setMessage("rollbacked").build());
                 responseObserver.onCompleted();
-            } catch (SQLException e) {
+            } catch (Exception e) {
 
                 responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not rollback and release the locks").build());
                 responseObserver.onCompleted();

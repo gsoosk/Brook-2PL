@@ -55,9 +55,8 @@ public class ConcurrencyControl {
         }
     }
 
-    private static String url = "";
-    private static final String user = "username";
-    private static final String password = "password";
+
+
 
     private static final long LOCK_THINKING_TIME = 0;
     public static  long OPERATION_THINKING_TIME = 0;
@@ -66,75 +65,28 @@ public class ConcurrencyControl {
 
     private final BiKeyHashMap<String, String, String> dirtyReads = new BiKeyHashMap<>(); // <tx, resource, value>
 
-    private final HikariDataSource dataSource;
+
 
     private KeyValueRepository keyValueRepository;
 
     public ConcurrencyControl(String addr, String port) {
-        url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
-
-        HikariConfig connectionPoolConfig = new HikariConfig();
-        connectionPoolConfig.setJdbcUrl(url);
-        connectionPoolConfig.setUsername(user);
-        connectionPoolConfig.setPassword(password);
-
-        connectionPoolConfig.setMaximumPoolSize(200);
-//        connectionPoolConfig.setMinimumIdle(5);
-        connectionPoolConfig.setAutoCommit(false);
-//        connectionPoolConfig.setIdleTimeout(30000);
-//        connectionPoolConfig.setMaxLifetime(1800000);
-//        connectionPoolConfig.setConnectionTimeout(30000);
-
-        this.dataSource = new HikariDataSource(connectionPoolConfig);
-
-        setPostgresLogLevel("DEBUG1");
-        keyValueRepository = new PostgresRepo();
+        String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
+//        TODO: fix rollback
+        keyValueRepository = new PostgresRepo(url);
 
     }
 
-    private void setPostgresLogLevel(String level) {
-        try (Connection conn = DriverManager.getConnection(url, user, password);
-             Statement stmt = conn.createStatement()) {
 
-            // Set global log level for all sessions
 
-            stmt.execute("ALTER SYSTEM SET log_min_messages TO 'INFO';");
-
-            // Reload the configuration for changes to take effect
-            stmt.execute("SELECT pg_reload_conf();");
-
-        } catch (Exception e) {
-            e.printStackTrace();
+    public void initTransaction(DBTransaction transaction) throws SQLException {
+        if (keyValueRepository instanceof PostgresRepo) {
+            Connection conn = ((PostgresRepo) keyValueRepository).connect();
+            conn.setAutoCommit(false);
+            transaction.setConnection(conn);
         }
-
-
-    }
-
-    private void setDeadlockDetectionTimeout(Connection conn, String timeout) throws SQLException {
-        try {
-            Statement stmt = conn.createStatement();
-            stmt.execute("SET deadlock_timeout = '" + timeout + "'");
-        } catch (SQLException e) {
-            log.error("Could not initialize deadlock detection");
-            throw e;
-        }
-
     }
 
 
-    public Connection connect() throws SQLException {
-        Connection conn = null;
-        try {
-            conn = dataSource.getConnection();
-//            conn.setAutoCommit(false);
-//            setDeadlockDetectionTimeout(conn, "1s");
-            log.info("Connection created");
-        } catch (SQLException e) {
-            log.info(e.getMessage());
-            throw e;
-        }
-        return conn;
-    }
 
 
 
@@ -511,16 +463,11 @@ public class ConcurrencyControl {
     }
 
 
-    public void rollback(DBTransaction tx,  Set<DBTransaction> toBeAborted) throws SQLException {
+    public void rollback(DBTransaction tx,  Set<DBTransaction> toBeAborted) throws Exception {
         try {
-            Connection conn = tx.getConnection();
-            ((PGConnection) conn).cancelQuery();
-
-            conn.rollback();
-//            unlockAllAdvisoryLocks(tx, conn);
+            keyValueRepository.rollback(tx);
             unlockAll(tx, toBeAborted);
-            conn.close();
-        } catch (SQLException e) {
+        } catch (Exception e) {
             log.error("Could not rollback and release the locks: {}", e.getMessage());
             throw e;
         }
@@ -554,33 +501,6 @@ public class ConcurrencyControl {
 
 
 
-    public Integer lastId(String table) throws SQLException {
-
-        try (Connection conn = connect()) {
-            DatabaseMetaData metaData = conn.getMetaData();
-            try (ResultSet columns = metaData.getColumns(null, null, table.toLowerCase(), null)) {
-                if (columns.next()) {
-                    String firstColumnName = columns.getString("COLUMN_NAME");
-                    String query = "SELECT MAX(\"" + firstColumnName + "\") FROM " + table;
-                    try (Statement statement = conn.createStatement();
-                         ResultSet resultSet = statement.executeQuery(query)) {
-                        if (resultSet.next()) {
-                            int nextId = Integer.parseInt(resultSet.getString(1));
-                            conn.close();
-                            return nextId;
-                        }
-                    }
-                }
-            }
-        } catch (SQLException ex) {
-            log.info(ex.getMessage());
-            throw ex;
-        }
-
-        return 0;
-    }
-
-
 
     public void insert(DBTransaction tx, DBInsertData d) throws Exception {
         keyValueRepository.insert(tx, d);
@@ -592,6 +512,10 @@ public class ConcurrencyControl {
 
     public void remove(DBTransaction tx, DBDeleteData d) throws Exception {
         keyValueRepository.remove(tx, d);
+    }
+
+    public int lastId(String table) throws Exception {
+        return keyValueRepository.lastId(table);
     }
 }
 

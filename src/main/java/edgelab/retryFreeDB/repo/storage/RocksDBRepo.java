@@ -23,6 +23,8 @@ import java.util.Map;
 @Slf4j
 public class RocksDBRepo implements KeyValueRepository{
 
+//    TODO: SHould implement rollback mechanism
+
 
     @Override
     public void insert(DBTransaction tx, DBInsertData data) throws Exception {
@@ -42,5 +44,15 @@ public class RocksDBRepo implements KeyValueRepository{
     @Override
     public String read(DBTransaction tx, DBData data) throws Exception {
         return null;
+    }
+
+    @Override
+    public Integer lastId(String table) throws Exception {
+        return null;
+    }
+
+    @Override
+    public void rollback(DBTransaction tx) throws Exception {
+
     }
 }

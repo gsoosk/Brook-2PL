@@ -38,7 +38,7 @@ public class StoredProcedureClient extends Client{
 
     private RetryFreeDBServer.RetryFreeDBService dbService;
     private RetryFreeDBServer.RetryFreeDBServiceWrapper blockingStub;
-    public StoredProcedureClient(String postgresAddress, String postgresPort, String[] tables, String mode) throws SQLException {
+    public StoredProcedureClient(String postgresAddress, String postgresPort, String[] tables, String mode) throws Exception {
         this.dbService = new RetryFreeDBServer.RetryFreeDBService(postgresAddress, postgresPort, tables);
         this.blockingStub = new RetryFreeDBServer.RetryFreeDBServiceWrapper(dbService);
         this.mode = mode;

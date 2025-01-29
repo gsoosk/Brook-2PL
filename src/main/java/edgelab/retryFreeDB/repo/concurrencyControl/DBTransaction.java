@@ -1,6 +1,7 @@
 package edgelab.retryFreeDB.repo.concurrencyControl;
 
 import lombok.Getter;
+import lombok.Setter;
 
 import java.sql.Connection;
 import java.util.Set;
@@ -13,6 +14,7 @@ public class DBTransaction {
     @Getter
     private boolean abort = false;
     @Getter
+    @Setter
     private Connection connection;
 
 
@@ -44,11 +46,11 @@ public class DBTransaction {
     @Getter
     private final Set<String> resources = ConcurrentHashMap.newKeySet();
     private final AtomicInteger commitSemaphore;
-    public DBTransaction(String timestamp,Connection connection) {
+    public DBTransaction(String timestamp) {
 
         this.timestamp = timestamp;
         this.abort = false;
-        this.connection = connection;
+        this.connection = null;
         commitSemaphore = new AtomicInteger(0);
         this.waitingTime = 0;
         this.ioTime = 0;
