@@ -220,4 +220,11 @@ public class PostgresRepo implements KeyValueRepository {
         conn.close();
 
     }
+
+    @Override
+    public void commit(DBTransaction tx) throws Exception {
+        Connection conn = tx.getConnection();
+        conn.commit();
+        conn.close();
+    }
 }

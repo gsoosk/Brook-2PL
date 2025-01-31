@@ -10,8 +10,10 @@ import edgelab.retryFreeDB.repo.storage.DTO.DBWriteData;
 import edgelab.retryFreeDB.repo.concurrencyControl.util.BiKeyHashMap;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
+import edgelab.retryFreeDB.repo.storage.RocksDBRepo;
 import lombok.extern.slf4j.Slf4j;
 import org.postgresql.PGConnection;
+import org.rocksdb.RocksDBException;
 
 import java.sql.Connection;
 import java.sql.DatabaseMetaData;
@@ -24,6 +26,7 @@ import java.sql.Statement;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -69,10 +72,13 @@ public class ConcurrencyControl {
 
     private KeyValueRepository keyValueRepository;
 
-    public ConcurrencyControl(String addr, String port) {
+    public ConcurrencyControl(String addr, String port) throws RocksDBException {
         String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
 //        TODO: fix rollback
-        keyValueRepository = new PostgresRepo(url);
+        if (Objects.equals(port, "-1"))
+            keyValueRepository = new RocksDBRepo(addr);
+        else
+            keyValueRepository = new PostgresRepo(url);
 
     }
 
@@ -449,14 +455,13 @@ public class ConcurrencyControl {
 //        }
 //        log.info("Locks on table {} acquired", data.getTable());
 //    }
-    public void release(DBTransaction tx, Set<DBTransaction> toBeAborted) throws SQLException {
+    public void release(DBTransaction tx, Set<DBTransaction> toBeAborted) throws Exception {
         try {
-            Connection conn = tx.getConnection();
-            conn.commit();
+            keyValueRepository.commit(tx);
 //            unlockAllAdvisoryLocks(tx, conn);
             unlockAll(tx, toBeAborted);
-            conn.close();
-        } catch (SQLException e) {
+
+        } catch (Exception e) {
             log.error("Could not release the locks: {}", e.getMessage());
             throw e;
         }

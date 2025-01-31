@@ -943,7 +943,7 @@ public class StoredProcedureClient extends Client{
 
                 Result insertListingResult = insertLock(transactionId, "Listings");
                 String listingRecordId = insertListingResult.getMessage();
-                insert(transactionId, "Listings", IId + "," + price, listingRecordId);
+                insert(transactionId, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
                 getCommitResult(transactionId, res);
                 res.setMessage(listingRecordId);
                 return res;
@@ -1000,7 +1000,7 @@ public class StoredProcedureClient extends Client{
 
                 Result insertListingResult = insertLock(transactionId, "Listings");
                 String listingRecordId = insertListingResult.getMessage();
-                insert(transactionId, "Listings", IId + "," + price, listingRecordId);
+                insert(transactionId, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
 //
                 waitForCommit(transactionId);
 
@@ -1168,7 +1168,7 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 
-                insert(transactionId, "Listings", IId + "," + price, listingRecordId);
+                insert(transactionId, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
                 getCommitResult(transactionId, res);
                 res.setMessage(listingRecordId);
                 return res;
@@ -1465,6 +1465,21 @@ public class StoredProcedureClient extends Client{
                 .setKey(tableName)
                 .setValue(newRecord)
                 .setRecordId(recordId)
+                .build();
+        Result result = blockingStub.update(insertData);
+        log.info("insert data with id {} into {} status : {}", recordId, tableName, result.getStatus());
+        if (!result.getStatus())
+            throw new Exception(result.getMessage());
+    }
+
+    private void insert(String transactionId, String tableName, String newRecord, String recordId, String recordKeys) throws Exception {
+        Data insertData = Data.newBuilder()
+                .setTransactionId(transactionId)
+                .setType(INSERT_TYPE)
+                .setKey(tableName)
+                .setValue(newRecord)
+                .setRecordId(recordId)
+                .setRecordKeys(recordKeys)
                 .build();
         Result result = blockingStub.update(insertData);
         log.info("insert data with id {} into {} status : {}", recordId, tableName, result.getStatus());

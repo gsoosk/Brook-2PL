@@ -15,14 +15,19 @@ import java.util.Random;
 import java.util.UUID;
 
 public class InitStoreBenchmark {
-    private static final int NUM_OF_PLAYERS = 500000;
-    private static final int NUM_OF_EACH_PLAYER_ITEMS = 5;
+    public static final int NUM_OF_PLAYERS = 1000000;
+    public static final int NUM_OF_EACH_PLAYER_ITEMS = 5;
     private static final int NUM_OF_INITIAL_LISTINGS = 100000;
     private static final double PLAYER_CASH_MIN = 10000;
     private static final double PLAYER_CASH_MAX = 50000;
     private static final double ITEM_PRICE_MIN = 1;
     private static final double ITEM_PRICE_MAX = 5;
     private static final int NAME_LENGTH = 8;
+    public static final Map<String, Integer> lastIdUsed = Map.of(
+            "Players", NUM_OF_PLAYERS,
+            "Items", NUM_OF_PLAYERS * NUM_OF_EACH_PLAYER_ITEMS,
+            "Listings", NUM_OF_INITIAL_LISTINGS
+    );
 
     private static final ObjectMapper objectMapper = new ObjectMapper();
     private static final Random random = new Random();
@@ -70,7 +75,7 @@ public class InitStoreBenchmark {
     private static void insertPlayers(RocksDB db) throws RocksDBException {
         System.out.println("Generating players...");
         for (int i = 0; i < NUM_OF_PLAYERS; i++) {
-            String key = "Player:" + i;
+            String key = "Players:" + i;
             Map<String, String> player = new HashMap<>();
             player.put("Pname", "P" + randomString(NAME_LENGTH));
             player.put("Pcash", String.valueOf( (int) (PLAYER_CASH_MIN + (PLAYER_CASH_MAX - PLAYER_CASH_MIN) * random.nextDouble())));
@@ -84,7 +89,7 @@ public class InitStoreBenchmark {
         for (int playerId = 0; playerId < NUM_OF_PLAYERS; playerId++) {
             for (int offset = 0; offset < NUM_OF_EACH_PLAYER_ITEMS; offset++) {
                 int itemId = playerId * NUM_OF_EACH_PLAYER_ITEMS + offset;
-                String key = "Item:" + itemId;
+                String key = "Items:" + itemId;
                 Map<String, String> item = new HashMap<>();
                 item.put("IName", "I" + randomString(NAME_LENGTH));
                 item.put("IOwner", String.valueOf(playerId));
@@ -94,11 +99,13 @@ public class InitStoreBenchmark {
         System.out.println("Items inserted.");
     }
 
+    private static Map<String, String> itemsListings = new HashMap<>();
     private static void insertListings(RocksDB db) throws RocksDBException {
         System.out.println("Generating listings...");
         for (int i = 0; i < NUM_OF_INITIAL_LISTINGS; i++) {
-            String key = "Listing:" + i;
-            int randomItemId = random.nextInt(NUM_OF_PLAYERS * NUM_OF_EACH_PLAYER_ITEMS);
+            String key = "Listings:" + i;
+            int randomItemId = random.nextInt((NUM_OF_PLAYERS) / 5 * NUM_OF_EACH_PLAYER_ITEMS);
+            itemsListings.put(String.valueOf(randomItemId), String.valueOf(i));
             Map<String, String> listing = new HashMap<>();
             listing.put("LIId", String.valueOf(randomItemId));
             listing.put("LPrice", String.valueOf((int) (ITEM_PRICE_MIN + (ITEM_PRICE_MAX - ITEM_PRICE_MIN) * random.nextDouble())));
@@ -143,7 +150,7 @@ public class InitStoreBenchmark {
         for (int num : HOT_RECORDS_PLAYERS) {
             List<String> randomPlayers = new ArrayList<>();
             for (int i = 0; i < num; i++) {
-                randomPlayers.add("Player:" + random.nextInt(NUM_OF_PLAYERS));
+                randomPlayers.add("Players:" + random.nextInt(NUM_OF_PLAYERS));
             }
 
             List<String> itemRecords = new ArrayList<>();
@@ -152,7 +159,7 @@ public class InitStoreBenchmark {
                 byte[] playerData = db.get(playerKey.getBytes());
                 if (playerData != null) {
                     for (int j = 0; j < NUM_OF_EACH_PLAYER_ITEMS; j++) {
-                        String itemKey = "Item:" + (Integer.parseInt(playerKey.split(":")[1]) * NUM_OF_EACH_PLAYER_ITEMS + j);
+                        String itemKey = "Items:" + (Integer.parseInt(playerKey.split(":")[1]) * NUM_OF_EACH_PLAYER_ITEMS + j);
                         byte[] itemData = db.get(itemKey.getBytes());
                         if (itemData != null) {
                             String itemId = itemKey.split(":")[1];
@@ -166,7 +173,7 @@ public class InitStoreBenchmark {
 
             List<String> listingRecords = new ArrayList<>();
             for (String itemId : itemIds) {
-                String listingKey = "Listing:" + itemId;
+                String listingKey = "Listings:" + itemsListings.get(itemId);
                 byte[] listingData = db.get(listingKey.getBytes());
                 if (listingData != null) {
                     Map<String, String> listingMap = objectMapper.readValue(new String(listingData), Map.class);

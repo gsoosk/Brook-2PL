@@ -4,6 +4,8 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -46,6 +48,8 @@ public class DBTransaction {
     @Getter
     private final Set<String> resources = ConcurrentHashMap.newKeySet();
     private final AtomicInteger commitSemaphore;
+
+    private List<byte[]> WAL;
     public DBTransaction(String timestamp) {
 
         this.timestamp = timestamp;
@@ -60,6 +64,7 @@ public class DBTransaction {
         this.unlockingTime = 0;
         this.committingTime = 0;
         this.waitingForOthersTime = 0;
+        this.WAL = new ArrayList<>();
     }
 
     @Override
@@ -163,5 +168,9 @@ public class DBTransaction {
     public void finishWaitingForOthers() {
         if (previousWaitingForOthersStart != -1)
             this.waitingForOthersTime += (System.currentTimeMillis() - previousWaitingForOthersStart);
+    }
+
+    public void appendWAL(byte[] initValue) {
+        this.WAL.add(initValue);
     }
 }

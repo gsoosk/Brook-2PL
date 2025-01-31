@@ -328,7 +328,7 @@ public class RetryFreeDBServer {
                         .putReturns("waiting_for_others_time", String.valueOf(tx.getWaitingForOthersTime()))
                         .setMessage("released").build());
                 responseObserver.onCompleted();
-            } catch (SQLException e) {
+            } catch (Exception e) {
                 responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build());
                 responseObserver.onCompleted();
             }

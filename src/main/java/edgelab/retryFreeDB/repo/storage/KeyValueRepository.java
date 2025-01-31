@@ -19,4 +19,5 @@ public interface KeyValueRepository {
     void rollback(DBTransaction tx) throws Exception;
 
 
+    void commit(DBTransaction tx) throws Exception;
 }

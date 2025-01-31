@@ -9,6 +9,7 @@ import edgelab.retryFreeDB.benchmark.util.RandomGenerator;
 import edgelab.retryFreeDB.benchmark.util.TPCCConfig;
 import edgelab.retryFreeDB.benchmark.util.TPCCUtil;
 import edgelab.retryFreeDB.clients.StoredProcedureClient;
+import edgelab.retryFreeDB.init.InitStoreBenchmark;
 import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -175,7 +176,7 @@ public class Performance {
 //    Multi-threading
     private int MAX_THREADS = 60;
     private int MAX_ITEM_READ_THREADS = 20;
-    private final int MAX_QUEUE_SIZE = 2;
+    private final int MAX_QUEUE_SIZE = 5;
     private int MAX_RETRY = -1;
     private ThreadPoolExecutor executor;
     private ThreadPoolExecutor itemExecutor;
@@ -185,9 +186,10 @@ public class Performance {
     private List<String> hotItems = new ArrayList<>();
     private Map<String, List<String>> hotListings; // Listing: <iid, price>
     private Set<String> alreadyBoughtListing = new HashSet<>();
+    private int nextNotHotListingID = 10;
+    private int nextNotHotItem = (InitStoreBenchmark.NUM_OF_PLAYERS / 5) * InitStoreBenchmark.NUM_OF_EACH_PLAYER_ITEMS;
     private int HOT_RECORD_SELECTION_CHANCE = 0;
-    private int NUM_OF_PLAYERS = 500000;
-    private int NUM_OF_LILSTINGS = 100000;
+    private final int NUM_OF_PLAYERS = InitStoreBenchmark.NUM_OF_PLAYERS;
     private int NUM_OF_WAREHOUSES = 1;
     private int NUM_OF_HOT_WAREHOUSE = 0;
 
@@ -356,7 +358,7 @@ public class Performance {
             client = new InteractiveClient(address, port, res.getString("2PLMode"));
         }
         else {
-            client = new StoredProcedureClient(address, "5432", "Listings,Items,Players".split(","), res.getString("2PLMode"));
+            client = new StoredProcedureClient(address, String.valueOf(port), "Listings,Items,Players".split(","), res.getString("2PLMode"));
         }
         client.setServerConfig(serverConfig);
 
@@ -464,12 +466,12 @@ public class Performance {
                 while (itemExecutor.getQueue().size() >= MAX_QUEUE_SIZE) {
                     if ((System.currentTimeMillis() - sendingStart) / 1000 >= benchmarkTime)
                         break;
-                    try {
-                        log.debug("sleep");
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
+//                    try {
+//                        log.debug("sleep");
+//                        Thread.sleep(1);
+//                    } catch (InterruptedException e) {
+//                        e.printStackTrace();
+//                    }
                 }
             }
         });
@@ -648,9 +650,9 @@ public class Performance {
         } else {
             Map<String, String> tx = new HashMap<>();
             if (buy_or_sell % 2 == 0) {
-                String lid = Integer.toString(random.nextInt(1, NUM_OF_LILSTINGS));
-                while (alreadyBoughtListing.contains(lid))
-                    lid = Integer.toString(random.nextInt(1, NUM_OF_LILSTINGS));
+                String lid = String.valueOf(++nextNotHotListingID);
+                while (alreadyBoughtListing.contains(lid) || hotListings.containsKey(lid))
+                    lid = String.valueOf(++nextNotHotListingID);
 
                 alreadyBoughtListing.add(lid);
                 tx.put("PId", Integer.toString(random.nextInt(1, NUM_OF_PLAYERS)));
@@ -658,8 +660,11 @@ public class Performance {
                 long sendStartMs = System.currentTimeMillis();
                 return new StoreServerRequest(StoreServerRequest.Type.BUY, txId++, tx, sendStartMs);
             } else {
-                String randomPlayer = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
-                String randomItem = Integer.toString(Integer.parseInt(randomPlayer) * 5 + random.nextInt(0, 5));
+                String randomPlayer = Integer.toString((++nextNotHotItem / 5));
+                while (hotPlayersAndItems.containsKey(randomPlayer))
+                    randomPlayer = Integer.toString((++nextNotHotItem / 5));
+                String randomItem = Integer.toString(nextNotHotItem);
+
                 tx.put("PId", randomPlayer);
                 tx.put("IId", randomItem);
                 long sendStartMs = System.currentTimeMillis();
@@ -673,12 +678,12 @@ public class Performance {
         log.info("submitting the request {}", request.getValues());
         submitRequest(request, stats);
         while (executor.getQueue().size() >= MAX_QUEUE_SIZE) {
-            try {
-                log.debug("sleep");
-                Thread.sleep(1);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
+//            try {
+//                log.debug("sleep");
+////                Thread.sleep(1);
+//            } catch (InterruptedException e) {
+//                e.printStackTrace();
+//            }
         }
     }
 
@@ -749,8 +754,8 @@ public class Performance {
             if (request.getType() == StoreServerRequest.Type.BUY) {
                 result = client.buyListing(request.getValues().get("PId"), request.getValues().get("LId"));
                 if (!result.isSuccess()) {
-                    stats.addWaistedTime(result.getStart());
                     log.error("Unsuccessful buy {}", request.getValues());
+                    stats.addWaistedTime(result.getStart());
                     // we do not retry records that are not hot!
 //                    submitRetry(request, stats);
                 }
@@ -758,8 +763,8 @@ public class Performance {
             else if (request.getType() == StoreServerRequest.Type.SELL) {
                 result = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1);
                 if (!result.isSuccess()) {
-                    stats.addWaistedTime(result.getStart());
                     log.error("Unsuccessful sell {}", request.getValues());
+                    stats.addWaistedTime(result.getStart());
                     // we do not retry records that are not hot!
 //                    submitRetry(request, stats);
                 }
@@ -934,7 +939,7 @@ public class Performance {
                 .type(String.class)
                 .metavar("ADDRESS")
                 .dest("address")
-                .help("leader's address");
+                .help("Server address for interactive client / Postgres address for stored procedure / Rocksdb directory");
 
         parser.addArgument("--port")
                 .action(store())
@@ -942,7 +947,7 @@ public class Performance {
                 .type(Integer.class)
                 .metavar("PORT")
                 .dest("port")
-                .help("leader's port");
+                .help("Server port for interactive client / Postgres port for stored procedure / -1 For rocksdb");
 
         numberOptions.addArgument("--num-records")
                 .action(store())
