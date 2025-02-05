@@ -24,7 +24,7 @@ public abstract class Client {
 
         public TransactionResult() {
             this.success = false;
-            this.start = System.currentTimeMillis();
+            this.start = System.nanoTime();
             this.message = "";
         }
     }

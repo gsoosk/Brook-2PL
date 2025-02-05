@@ -8,13 +8,14 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class DBTransaction {
     @Getter
     private String timestamp;
     @Getter
-    private boolean abort = false;
+    private AtomicBoolean abort = new AtomicBoolean(false);
     @Getter
     @Setter
     private Connection connection;
@@ -53,7 +54,6 @@ public class DBTransaction {
     public DBTransaction(String timestamp) {
 
         this.timestamp = timestamp;
-        this.abort = false;
         this.connection = null;
         commitSemaphore = new AtomicInteger(0);
         this.waitingTime = 0;
@@ -73,8 +73,9 @@ public class DBTransaction {
     }
 
     public void setAbort() {
-        this.abort = true;
+        this.abort.set(true);
     }
+    public boolean isAbort() {return this.abort.get();}
 
 
     public void addResource(String resource) {
@@ -115,59 +116,59 @@ public class DBTransaction {
     }
 
     public void startWaiting() {
-        previousWaitStart = System.currentTimeMillis();
+        previousWaitStart = System.nanoTime();
     }
 
-    public void startIO() { previousIOStart = System.currentTimeMillis(); }
+    public void startIO() { previousIOStart = System.nanoTime(); }
 
-    public void startLocking() {previousLockStart = System.currentTimeMillis();}
+    public void startLocking() {previousLockStart = System.nanoTime();}
 
-    public void startRetireLock() {previousRetireStart = System.currentTimeMillis();}
+    public void startRetireLock() {previousRetireStart = System.nanoTime();}
 
-    public void startUnlocking() {previousUnlockStart = System.currentTimeMillis();}
+    public void startUnlocking() {previousUnlockStart = System.nanoTime();}
 
-    public void startCommitting() {previousCommitStart = System.currentTimeMillis();}
+    public void startCommitting() {previousCommitStart = System.nanoTime();}
 
-    public void startWaitingForOthers() {previousWaitingForOthersStart = System.currentTimeMillis();}
+    public void startWaitingForOthers() {previousWaitingForOthersStart = System.nanoTime();}
 
 
     public void wakesUp() {
         if (previousWaitStart != -1)
-            this.waitingTime += (System.currentTimeMillis() - previousWaitStart);
+            this.waitingTime += (System.nanoTime() - previousWaitStart);
     }
 
     public void finishIO() {
         if (previousIOStart != -1)
-            this.ioTime += (System.currentTimeMillis() - previousIOStart);
+            this.ioTime += (System.nanoTime() - previousIOStart);
     }
 
     public void finishLocking() {
         if (previousLockStart != -1)
-            this.lockingTime += (System.currentTimeMillis() - previousLockStart);
+            this.lockingTime += (System.nanoTime() - previousLockStart);
     }
 
     public void finishRetireLock() {
         if (previousRetireStart != -1)
-            this.retiringTime += (System.currentTimeMillis() - previousRetireStart);
+            this.retiringTime += (System.nanoTime() - previousRetireStart);
     }
 
     public void finishInitiation(long startTime) {
-        this.initiationTime += (System.currentTimeMillis() - startTime);
+        this.initiationTime += (System.nanoTime() - startTime);
     }
 
     public void finishUnlocking() {
         if (previousUnlockStart != -1)
-            this.unlockingTime += (System.currentTimeMillis() - previousUnlockStart);
+            this.unlockingTime += (System.nanoTime() - previousUnlockStart);
     }
 
     public void finishCommitting() {
         if (previousCommitStart != -1)
-            this.committingTime += (System.currentTimeMillis() - previousCommitStart);
+            this.committingTime += (System.nanoTime() - previousCommitStart);
     }
 
     public void finishWaitingForOthers() {
         if (previousWaitingForOthersStart != -1)
-            this.waitingForOthersTime += (System.currentTimeMillis() - previousWaitingForOthersStart);
+            this.waitingForOthersTime += (System.nanoTime() - previousWaitingForOthersStart);
     }
 
     public void appendWAL(byte[] initValue) {

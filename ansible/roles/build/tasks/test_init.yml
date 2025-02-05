@@ -6,7 +6,7 @@
 
 
 - name: copy docker compose to remote
-  copy:
+  synchronize:
     src: "docker-compose.yml"
     dest: "./test/docker-compose.yml"
 

@@ -17,7 +17,7 @@ import java.util.UUID;
 public class InitStoreBenchmark {
     public static final int NUM_OF_PLAYERS = 1000000;
     public static final int NUM_OF_EACH_PLAYER_ITEMS = 5;
-    private static final int NUM_OF_INITIAL_LISTINGS = 100000;
+    public static final int NUM_OF_INITIAL_LISTINGS = 100000;
     private static final double PLAYER_CASH_MIN = 10000;
     private static final double PLAYER_CASH_MAX = 50000;
     private static final double ITEM_PRICE_MIN = 1;
@@ -52,7 +52,7 @@ public class InitStoreBenchmark {
         System.out.println("Checkpoint directory: " + checkpointDir);
 
         RocksDB.loadLibrary();
-        try (Options options = new Options().setCreateIfMissing(true)) {
+        try (Options options = new Options().setCreateIfMissing(true).setWriteBufferSize(16L * 1024 * 1024 * 1024)) {
             RocksDB db = RocksDB.open(options, dbPath);
 
             // Insert data
@@ -104,7 +104,7 @@ public class InitStoreBenchmark {
         System.out.println("Generating listings...");
         for (int i = 0; i < NUM_OF_INITIAL_LISTINGS; i++) {
             String key = "Listings:" + i;
-            int randomItemId = random.nextInt((NUM_OF_PLAYERS) / 5 * NUM_OF_EACH_PLAYER_ITEMS);
+            int randomItemId = random.nextInt((NUM_OF_PLAYERS) / 10 * NUM_OF_EACH_PLAYER_ITEMS);
             itemsListings.put(String.valueOf(randomItemId), String.valueOf(i));
             Map<String, String> listing = new HashMap<>();
             listing.put("LIId", String.valueOf(randomItemId));

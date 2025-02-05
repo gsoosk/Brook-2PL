@@ -20,9 +20,15 @@ import org.rocksdb.*;
 import java.io.File;
 import java.io.IOException;
 import java.nio.ByteBuffer;
+import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
 import java.util.HashMap;
 import java.util.Map;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class RocksDBRepo implements KeyValueRepository{
@@ -31,28 +37,78 @@ public class RocksDBRepo implements KeyValueRepository{
 //    TODO: move dirty read to postgres
 
 
-    private RocksDB rocksDB;
+//    private RocksDB rocksDB;
+    private Map<String, Map<String, String>> rocksDB = new ConcurrentHashMap<>();
     private static final ObjectMapper objectMapper = new ObjectMapper();
     public RocksDBRepo(String dbDirectory) throws RocksDBException {
-        DBInit(dbDirectory);
+
+
+
+
+        try (Options options = new Options().setCreateIfMissing(false);
+             RocksDB db = RocksDB.open(options, dbDirectory)) {
+             RocksIterator iterator = db.newIterator();
+             ExecutorService executor = Executors.newFixedThreadPool(32);
+
+            iterator.seekToFirst();
+            while (iterator.isValid()) {
+                byte[] keyBytes = iterator.key();
+                byte[] valueBytes = iterator.value();
+                iterator.next();
+
+                executor.execute(() -> {
+                    try {
+                        String key = new String(keyBytes, StandardCharsets.UTF_8);
+                        String value = new String(valueBytes, StandardCharsets.UTF_8);
+                        rocksDB.put(key, objectMapper.readValue(value, Map.class));
+                    } catch (Exception e) {
+                        e.printStackTrace();
+                    }
+                });
+                }
+
+                executor.shutdown();
+                executor.awaitTermination(10, TimeUnit.MINUTES);
+            } catch (InterruptedException ex) {
+            throw new RuntimeException(ex);
+        }
+
+        System.out.println("Loaded " + rocksDB.size() + " entries into HashMap");
+
+
+
+//        DBInit(dbDirectory);
     }
 
-    private void DBInit(String dbPath) throws RocksDBException {
-        RocksDB.loadLibrary();
-        final Options options = new Options();
-        options.setCreateIfMissing(true);
-        try {
-            rocksDB = RocksDB.open(options, dbPath);
-            log.info("RocksDB initialized and ready to use");
-        } catch (RocksDBException ex) {
-            log.error("Could not init RocksDB");
-            throw ex;
-        }
-    }
+//    private void DBInit(String dbPath) throws RocksDBException {
+//        RocksDB.loadLibrary();
+//        final Options options = new Options();
+//        options.setCreateIfMissing(true)
+//                .setIncreaseParallelism(32)
+//                .setMaxBackgroundJobs(32)  // Tune based on available CPU cores
+//                .setAllowMmapReads(true)  // For faster reads
+//                .setAllowMmapWrites(true) // For faster writes
+//                .setCompressionType(CompressionType.LZ4_COMPRESSION) // Balanced performance
+//                .setWriteBufferSize(60L * 1024 * 1024 * 1024) // Larger buffer for batch writes
+//                .setMaxWriteBufferNumber(100)
+//                .setMinWriteBufferNumberToMerge(2);
+//
+////                .setUseFsync(false)
+////                .setAvoidFlushDuringShutdown(true) // Avoid flushing data on shutdown
+////                .setAvoidFlushDuringRecovery(true); // Skip flushing during recovery;
+//
+//        try {
+//            rocksDB = RocksDB.open(options, dbPath);
+//            log.info("RocksDB initialized and ready to use");
+//        } catch (RocksDBException ex) {
+//            log.error("Could not init RocksDB");
+//            throw ex;
+//        }
+//    }
 
     @Override
     public void insert(DBTransaction tx, DBInsertData data) throws Exception {
-        try {
+//        try {
             log.info("{}: insert {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String key = data.getTable() + ":" + data.getRecordId();
 
@@ -68,29 +124,30 @@ public class RocksDBRepo implements KeyValueRepository{
             }
 
 
-            rocksDB.put(key.getBytes(), objectToJson(value).getBytes());
-        } catch (RocksDBException e) {
-            log.error("{}: Could not write <{},{}>",tx.getTimestamp(), data.getTable() , data.getIds());
-            throw e;
-        }
+            rocksDB.put(key, value);
+//        } catch (RocksDBException e) {
+//            log.error("{}: Could not write <{},{}>",tx.getTimestamp(), data.getTable() , data.getIds());
+//            throw e;
+//        }
     }
 
     @Override
     public void remove(DBTransaction tx, DBDeleteData data) throws Exception {
-        try {
+//        try {
             log.info("{}: remove {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String key = getKey(data);
 
-            byte[] initValue = rocksDB.get(key.getBytes());
-            if (initValue != null)
-                tx.appendWAL(initValue);
+            Map<String, String> initValue = rocksDB.get(key);
+//            if (initValue != null)
+//                tx.appendWAL(initValue);
 
-            rocksDB.delete(key.getBytes());
+//            rocksDB.delete(key.getBytes());
+            rocksDB.remove(key);
 
-        } catch (RocksDBException e) {
-            log.error("{}: Could not delete <{}:{}>", tx.getTimestamp(), data.getTable(), data.getIds());
-            throw e;
-        }
+//        } catch (RocksDBException e) {
+//            log.error("{}: Could not delete <{}:{}>", tx.getTimestamp(), data.getTable(), data.getIds());
+//            throw e;
+//        }
     }
 
     @Override
@@ -99,18 +156,16 @@ public class RocksDBRepo implements KeyValueRepository{
             log.info("{}: update {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String key = getKey(data);
 
-            byte[] initValue = rocksDB.get(key.getBytes());
-            if (initValue == null)
+            Map<String, String> value = rocksDB.get(key);
+            if (value == null)
                 throw new RocksDBException("not existed");
+//            tx.appendWAL(initValue);
 
-            tx.appendWAL(initValue);
-
-            Map<String, String> value = objectMapper.readValue(initValue, Map.class);
             if (!value.containsKey(data.getVariable()))
                 throw new RocksDBException("does not contain variable: " + data.getVariable());
 
             value.put(data.getVariable(), data.getValue());
-            rocksDB.put(key.getBytes(), objectToJson(value).getBytes());
+            rocksDB.put(key, value);
         } catch (RocksDBException e) {
             log.error("{}: Could not write <{},{}>",tx.getTimestamp(), data.getTable() , data.getIds());
             throw e;
@@ -130,23 +185,15 @@ public class RocksDBRepo implements KeyValueRepository{
         return key.toString();
     }
 
-    private static String objectToJson(Object obj) throws JsonProcessingException {
-        try {
-            return objectMapper.writeValueAsString(obj);
-        } catch (IOException e) {
-            e.printStackTrace();
-            throw e;
-        }
-    }
     @Override
     public String read(DBTransaction tx, DBData data) throws Exception {
         try {
             log.info("{}: get {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String dbKey = getKey(data);
-            byte[] result = rocksDB.get(dbKey.getBytes());
-            if (result == null)
+            Map<String, String> mapData = rocksDB.get(dbKey);
+            if (mapData == null)
                 throw new RocksDBException("not existed");
-            Map<String, String> mapData = objectMapper.readValue(new String(result), Map.class);
+
 
             StringBuilder value = new StringBuilder();
             for (String key : mapData.keySet()) {

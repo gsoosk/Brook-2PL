@@ -23,6 +23,7 @@ import java.sql.ResultSet;
 import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
 import java.sql.Statement;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.Map;
@@ -97,10 +98,9 @@ public class ConcurrencyControl {
 
 
 
-    private final Map<String, DBLock> locks = new HashMap<>();
+    private final Map<String, DBLock> locks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> transactionResources = new ConcurrentHashMap<>();
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, DBData data) throws Exception {
-        tx.startLocking();
         String resource = getResource(data);
         DBLock lock;
         LockType lockType = LockType.WRITE;
@@ -108,10 +108,7 @@ public class ConcurrencyControl {
             lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
 
         log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
-        synchronized (locks) {
-            lock = locks.getOrDefault(resource, new DBLock(resource));
-            locks.put(resource, lock);
-        }
+        lock = locks.computeIfAbsent(resource, DBLock::new);
 
 
         synchronized (lock) {
@@ -155,7 +152,6 @@ public class ConcurrencyControl {
         }
 
         delay(LOCK_THINKING_TIME);
-        tx.finishLocking();
     }
 
     private static String getResource(DBData data) {
@@ -282,20 +278,19 @@ public class ConcurrencyControl {
     public void unlock(DBTransaction tx, DBData data, Set<DBTransaction> toBeAborted) throws Exception {
         String resource = getResource(data);
 
-        String dirtyRead = keyValueRepository.read(tx, data);
-        synchronized (dirtyReads) {
-            log.info("{}: adding dirty read for {}", tx, resource);
-            dirtyReads.put(tx.toString(), resource, dirtyRead);
+        if (keyValueRepository instanceof PostgresRepo) {
+            String dirtyRead = keyValueRepository.read(tx, data);
+            synchronized (dirtyReads) {
+                log.info("{}: adding dirty read for {}", tx, resource);
+                dirtyReads.put(tx.toString(), resource, dirtyRead);
+            }
         }
 
         releaseLock(tx, resource, toBeAborted);
     }
 
     private void releaseLock(DBTransaction tx, String resource, Set<DBTransaction> toBeAborted) {
-        DBLock lock;
-        synchronized (locks) {
-            lock = locks.get(resource);
-        }
+        DBLock lock = locks.get(resource);
 
         releaseLockWithoutPromotion(tx, lock, toBeAborted);
         synchronized (lock) {
@@ -366,17 +361,19 @@ public class ConcurrencyControl {
     }
 
     public void unlockAll(DBTransaction tx, Set<DBTransaction> toBeAborted) {
-        synchronized (locks) {
+//        synchronized (locks) {
             for (String resource : tx.getResources()) {
                 releaseLock(tx, resource, toBeAborted);
             }
             tx.clearResources();
 
-            synchronized (dirtyReads) {
-                log.info("{}: removing dirty reads for tx", tx);
-                dirtyReads.removeByTransaction(tx.toString());
+            if (keyValueRepository instanceof PostgresRepo) {
+                synchronized (dirtyReads) {
+                    log.info("{}: removing dirty reads for tx", tx);
+                    dirtyReads.removeByTransaction(tx.toString());
+                }
             }
-        }
+//        }
 
 
     }
@@ -390,10 +387,7 @@ public class ConcurrencyControl {
         DBLock lock;
 
         log.info("{}, retiring the lock {}", tx, resource);
-        synchronized (locks) {
-            lock = locks.getOrDefault(resource, new DBLock(resource));
-            locks.put(resource, lock);
-        }
+        lock = locks.computeIfAbsent(resource, DBLock::new);
 
         if (lock != null) {
             synchronized (lock) {
@@ -407,10 +401,12 @@ public class ConcurrencyControl {
                 lock.notifyAll(); // Notify all waiting threads
             }
 
-            String dirtyRead = keyValueRepository.read(tx, data);
-            synchronized (dirtyReads) {
-                log.info("{}: adding dirty read for {}", tx, resource);
-                dirtyReads.put(tx.toString(), resource, dirtyRead);
+            if (keyValueRepository instanceof PostgresRepo) {
+                String dirtyRead = keyValueRepository.read(tx, data);
+                synchronized (dirtyReads) {
+                    log.info("{}: adding dirty read for {}", tx, resource);
+                    dirtyReads.put(tx.toString(), resource, dirtyRead);
+                }
             }
         }
         else {
@@ -487,14 +483,17 @@ public class ConcurrencyControl {
         String resource = getResource(data);
 
         long last = System.currentTimeMillis();
-        synchronized (dirtyReads) {
-            if (dirtyReads.containsResource(resource)) {
-                log.info("{}: dirty read of {}", tx, resource);
-                delay(OPERATION_THINKING_TIME);
-                return dirtyReads.getByResource(resource);
+        if (keyValueRepository instanceof PostgresRepo) {
+            synchronized (dirtyReads) {
+                if (dirtyReads.containsResource(resource)) {
+                    log.info("{}: dirty read of {}", tx, resource);
+                    delay(OPERATION_THINKING_TIME);
+                    return dirtyReads.getByResource(resource);
+                }
             }
+
+            log.info("{}: dirty read time: {}", tx.getTimestamp(), System.currentTimeMillis() - last);
         }
-        log.info("{}: dirty read time: {}",tx.getTimestamp(), System.currentTimeMillis() - last);
 
 
         String value = keyValueRepository.read(tx, data);

@@ -1,6 +1,6 @@
 - name: Build server files
   hosts:
-    - localhost
+    - servers
   tasks:
     - include_role:
         name: build

@@ -91,29 +91,39 @@ public class RetryFreeDBServer {
 
         @Override
         public void beginTransaction(Empty request, StreamObserver<Result> responseObserver) {
+           Result result = beginTransaction(request);
+
+           responseObserver.onNext(result);
+           responseObserver.onCompleted();
+        }
+
+        public Result beginTransaction(Empty request) {
             try  {
-                long startTime = System.currentTimeMillis();
+                DBTransaction transaction = getTransaction(request);
 
-
-                long transactionId = lastTransactionId.incrementAndGet();
-                DBTransaction transaction = new DBTransaction(Long.toString(transactionId));
-                repo.initTransaction(transaction);
-
-                transactions.put(Long.toString(transactionId), transaction);
-
-                transaction.finishInitiation(startTime);
-                responseObserver.onNext(Result.newBuilder()
-                                        .setStatus(true)
-                                        .setMessage(Long.toString(transactionId)).build());
-                responseObserver.onCompleted();
+                return Result.newBuilder()
+                        .setStatus(true)
+                        .setMessage(transaction.getTimestamp()).build();
             }
             catch (SQLException ex) {
                 log.info("db error: couldn't connect/commit,  {}", ex.getMessage());
-                responseObserver.onNext(Result.newBuilder()
+                return Result.newBuilder()
                         .setStatus(false)
-                        .setMessage("b error: couldn't connect/commit,  {}").build());
-                responseObserver.onCompleted();
+                        .setMessage("b error: couldn't connect/commit,  {}").build();
             }
+        }
+
+        public DBTransaction getTransaction(Empty request) throws SQLException {
+            long startTime = System.nanoTime();
+
+            long transactionId = lastTransactionId.incrementAndGet();
+            DBTransaction transaction = new DBTransaction(Long.toString(transactionId));
+            repo.initTransaction(transaction);
+            transactions.put(Long.toString(transactionId), transaction);
+
+            transaction.finishInitiation(startTime);
+
+            return transaction;
         }
 
         private DBData deserilizeDataToDBData(Data request) {
@@ -124,107 +134,135 @@ public class RetryFreeDBServer {
             return d;
         }
 
-        @Override
-        public void lock(Data request, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(request.getTransactionId(), responseObserver)) return;
+        public boolean isTransactionInvalid(DBTransaction tx){
+            if (tx == null) {
+                log.info("transaction does not exist");
+                return true;
+            }
 
-
+            if (tx.isAbort()) {
+                log.info("{}: Transaction already aborted", tx);
+                return true;
+            }
+            return false;
+        }
+        public Result lock(Data request) {
             DBTransaction tx = transactions.get(request.getTransactionId());
+            return lock(tx, request);
+        }
+
+
+        public Result lock(DBTransaction tx, Data request) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not lock - tx is invalid").build();
+
+            tx.startLocking();
             DBData d = deserilizeDataToDBData(request);
 
             if (d != null) {
                 try {
                     repo.lock(tx,  toBeAbortedTransactions, d);
+                    tx.finishLocking();
                     if (d instanceof DBInsertData)
-                        responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage(((DBInsertData) d).getRecordId()).build());
+                        return Result.newBuilder().setStatus(true).setMessage(((DBInsertData) d).getRecordId()).build();
                     else
-                        responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage("done").build());
-                    responseObserver.onCompleted();
+                        return Result.newBuilder().setStatus(true).setMessage("done").build();
                 } catch (Exception e) {
-//                    if (e.getSQLState().equals(Postgres.DEADLOCK_ERROR)) {
-//                        responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("deadlock").build());
-//                    }
-//                    else
                     log.error(e.getMessage());
-                    responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not lock").build());
-                    responseObserver.onCompleted();
                 }
             }
 
+            tx.finishLocking();
+            return Result.newBuilder().setStatus(false).setMessage("Could not lock").build();
+        }
+
+
+        @Override
+        public void lock(Data request, StreamObserver<Result> responseObserver) {
+            Result result =  lock(request);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
         }
         @Override
         public void unlock(Data request, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(request.getTransactionId(), responseObserver)) return;
+            Result result = unlock(request);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
 
+        }
+
+        public Result unlock(Data request) {
             DBTransaction tx = transactions.get(request.getTransactionId());
+            return unlock(request, tx);
+        }
+
+        private Result unlock(Data request, DBTransaction tx) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not unlock - tx is invalid").build();
+
+            tx.startUnlocking();
             DBData d = deserilizeDataToDBData(request);
             if (d != null) {
-                tx.startUnlocking();
                 try {
                     repo.unlock(tx, d, toBeAbortedTransactions);
+                    tx.finishUnlocking();
+
                     if (d instanceof DBInsertData)
-                        responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage(((DBInsertData) d).getRecordId()).build());
+                        return Result.newBuilder().setStatus(true).setMessage(((DBInsertData) d).getRecordId()).build();
                     else
-                        responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage("done").build());
-                    responseObserver.onCompleted();
+                        return Result.newBuilder().setStatus(true).setMessage("done").build();
                 } catch (Exception e) {
-                    responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not unlock").build());
-                    responseObserver.onCompleted();
+                    log.info("{}: could not unlock {}", tx.getTimestamp(), e.getMessage());
                 }
                 tx.finishUnlocking();
             }
+            return Result.newBuilder().setStatus(false).setMessage("Could not unlock").build();
         }
-
 
 
         @Override
         public void lockAndUpdate(Data request, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(request.getTransactionId(), responseObserver)) return;
 
-            DBTransaction tx = transactions.get(request.getTransactionId());
-            DBData d = deserilizeDataToDBData(request);
-
-            if (d != null) {
-                try {
-                    repo.lock(tx, toBeAbortedTransactions, d);
-                } catch (Exception e) {
-//                    if (e.getSQLState().equals(Postgres.DEADLOCK_ERROR))
-//                        responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("deadlock").build());
-//                    else
-                        responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not lock").build());
-                    responseObserver.onCompleted();
-                    return;
-                }
-                updateDBDataOnRepo(responseObserver, d, tx);
-            }
-            else {
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not deserialize data").build());
-                responseObserver.onCompleted();
-            }
         }
 
 
         @Override
         public void update(Data request, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(request.getTransactionId(), responseObserver)) return;
-
-            DBTransaction tx = transactions.get(request.getTransactionId());
-            DBData d = deserilizeDataToDBData(request);
-
-            if (d != null) {
-                log.info("{}: update on {}", tx, request.getKey());
-                updateDBDataOnRepo(responseObserver, d, tx);
-            }
-            else {
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not deserialize data").build());
-                responseObserver.onCompleted();
-            }
+            Result result = update(request);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
         }
 
-        private void updateDBDataOnRepo(StreamObserver<Result> responseObserver, DBData d, DBTransaction tx) {
+        public Result update(Data request) {
+
+            DBTransaction tx = transactions.get(request.getTransactionId());
+            return update(tx, request);
+        }
+
+        public Result update(DBTransaction tx, Data request) {
+
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not update - tx is invalid").build();
+
+            tx.startIO();
+            DBData d = deserilizeDataToDBData(request);
+
+            Result result;
+            if (d != null) {
+                log.info("{}: update on {}", tx, request.getKey());
+                result = updateDBDataOnRepo(d, tx);
+            }
+            else {
+                result = Result.newBuilder().setStatus(false).setMessage("Could not deserialize data").build();
+            }
+
+            tx.finishIO();
+            return result;
+        }
+
+        private Result updateDBDataOnRepo(DBData d, DBTransaction tx) {
             try {
                 String result = "done";
-                tx.startIO();
                 if (d instanceof DBDeleteData)
                     repo.remove(tx, (DBDeleteData) d);
                 else if (d instanceof DBWriteData)
@@ -233,14 +271,11 @@ public class RetryFreeDBServer {
                     repo.insert(tx, (DBInsertData) d);
                 else
                     result = repo.get(tx, d);
-                tx.finishIO();
-                responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage(result).build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(true).setMessage(result).build();
             }
             catch (Exception ex) {
                 tx.finishIO();
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not perform update: " + ex.getMessage()).build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(false).setMessage("Could not perform update: " + ex.getMessage()).build();
             }
         }
 
@@ -305,19 +340,29 @@ public class RetryFreeDBServer {
             return true;
         }
 
-
         @Override
         public void commitTransaction(TransactionId transactionId, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(transactionId.getId(), responseObserver)) return;
-
+            Result result = commitTransaction(transactionId);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
+        }
+        public Result commitTransaction(TransactionId transactionId) {
             DBTransaction tx = transactions.get(transactionId.getId());
+            return commitTransaction(tx);
+        }
+
+        public Result commitTransaction(DBTransaction tx) {
+
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not commit - tx is invalid").build();
+
             try {
                 tx.startCommitting();
                 repo.release(tx, toBeAbortedTransactions);
-                transactions.remove(transactionId.getId());
+                transactions.remove(tx.getTimestamp());
                 tx.finishCommitting();
-                log.warn("{}, Transaciton commited, total waiting time: {}", transactionId.getId(), tx.getWaitingTime());
-                responseObserver.onNext(Result.newBuilder().setStatus(true)
+                log.warn("{}, Transaciton commited, total waiting time: {}", tx.getTimestamp(), tx.getWaitingTime());
+                return Result.newBuilder().setStatus(true)
                         .putReturns("waiting_time", String.valueOf(tx.getWaitingTime()))
                         .putReturns("io_time", String.valueOf(tx.getIoTime()))
                         .putReturns("locking_time", String.valueOf(tx.getLockingTime()))
@@ -326,11 +371,9 @@ public class RetryFreeDBServer {
                         .putReturns("unlocking_time", String.valueOf(tx.getUnlockingTime()))
                         .putReturns("committing_time", String.valueOf(tx.getCommittingTime()))
                         .putReturns("waiting_for_others_time", String.valueOf(tx.getWaitingForOthersTime()))
-                        .setMessage("released").build());
-                responseObserver.onCompleted();
+                        .setMessage("released").build();
             } catch (Exception e) {
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build();
             }
         }
 
@@ -361,25 +404,35 @@ public class RetryFreeDBServer {
 
         @Override
         public void bambooRetireLock(Data request, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(request.getTransactionId(), responseObserver)) return;
+            Result result = bambooRetireLock(request);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
+        }
+
+        public Result bambooRetireLock(Data request) {
 
             DBTransaction tx = transactions.get(request.getTransactionId());
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not retire - tx is invalid").build();
+
+            Result result;
             DBData d = deserilizeDataToDBData(request);
             if (d != null) {
                 tx.startRetireLock();
                 try {
                     repo.retireLock(tx, d);
-                    responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage("done").build());
-                    responseObserver.onCompleted();
+                    result = Result.newBuilder().setStatus(true).setMessage("done").build();
                 } catch (Exception e) {
-                    responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not retire " + e.getMessage()).build());
-                    responseObserver.onCompleted();
+                    result = Result.newBuilder().setStatus(false).setMessage("Could not retire " + e.getMessage()).build();
                 }
                 tx.finishRetireLock();
             }
-
-
+            else {
+                result = Result.newBuilder().setStatus(false).setMessage("Could not retire:  deserilize problem ").build();
+            }
+            return result;
         }
+
         @Override
         public void bambooWaitForCommit(TransactionId transactionId, StreamObserver<Result> responseObserver) {
             if (isTransactionInvalid(transactionId.getId(), responseObserver)) return;
@@ -540,10 +593,6 @@ public class RetryFreeDBServer {
             return executeWithObserver(observer -> service.unlock(request, observer));
         }
 
-        // Wrapper for lockAndUpdate
-        public Result lockAndUpdate(Data request) {
-            return executeWithObserver(observer -> service.lockAndUpdate(request, observer));
-        }
 
         // Wrapper for update
         public Result update(Data request) {
