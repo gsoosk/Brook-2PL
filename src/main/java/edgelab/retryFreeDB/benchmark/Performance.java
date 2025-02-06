@@ -43,6 +43,7 @@ import java.rmi.RemoteException;
 import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
@@ -188,10 +189,12 @@ public class Performance {
     private ThreadPoolExecutor executor;
     private ThreadPoolExecutor itemExecutor;
     private Client client;
-    private long txId = 0;
-    private Map<String, Set<String>> hotPlayersAndItems; // Player:{items}
-    private List<String> hotItems = new ArrayList<>();
-    private Map<String, List<String>> hotListings; // Listing: <iid, price>
+    private final AtomicLong txId = new AtomicLong(0);
+    private ConcurrentLinkedQueue<Pair<String, String>> hotPlayersAndItems; // purchasable items pid,iid
+    private List<String> hotPlayers = new CopyOnWriteArrayList<>();
+    private final List<String> hotItems = new ArrayList<>(); // for read only tx
+    private ConcurrentLinkedQueue<Pair<String, String>> hotListings; // current listings: lid, iid
+    private final Set<String> readOnlyHotListings = ConcurrentHashMap.newKeySet();
     private final Set<String> alreadyBoughtListing = ConcurrentHashMap.newKeySet();
     private AtomicInteger nextNotHotListingID = new AtomicInteger(10);
     private static final int initialNotHotPlayerIndex = (InitStoreBenchmark.NUM_OF_PLAYERS / 10);
@@ -207,8 +210,8 @@ public class Performance {
     private AtomicInteger buy_or_sell = new AtomicInteger(1);
     private AtomicInteger buy_or_sell_hot = new AtomicInteger(1);
     private final RandomGenerator random = new RandomGenerator(1234);
-    private static Map<String, Set<String>> readHotPlayerRecords(String filePath) {
-        Map<String, Set<String>> map = new ConcurrentHashMap<>();
+    private static ConcurrentLinkedQueue<Pair<String, String>> readHotPlayerRecords(String filePath) {
+        List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -216,29 +219,29 @@ public class Performance {
                 if (parts.length >= 2) {
                     String key = parts[1].trim(); // Second column as key
                     String value = parts[0].trim(); // First column as value
-
-                    // Check if the key exists and add the value to its list
-                    map.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet()).add(value);
+                    list.add(new Pair<>(key, value));
                 }
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
-        return map;
+        Collections.shuffle(list);
+
+        return new ConcurrentLinkedQueue<>(list);
     }
 
 
-    private static Map<String, List<String>> readHotListingRecords(String filePath) {
-        Map<String, List<String>> records = new ConcurrentHashMap<>();
+    private static ConcurrentLinkedQueue<Pair<String, String>> readHotListingRecords(String filePath) {
+        ConcurrentLinkedQueue<Pair<String, String>> records = new ConcurrentLinkedQueue<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String[] parts = line.split(",");
                 if (parts.length == 3) {
-                    String firstColumn = parts[0].trim();
-                    String secondColumn = parts[1].trim();
+                    String lid = parts[0].trim();
+                    String pid = parts[1].trim();
                     String thirdColumn = parts[2].trim();
-                    records.put(firstColumn, List.of( secondColumn, thirdColumn));
+                    records.add(new Pair<>(lid, pid));
                 }
             }
         } catch (IOException e) {
@@ -248,15 +251,13 @@ public class Performance {
     }
 
     private void removeAlreadyListedRecords() {
-        for (String player : hotPlayersAndItems.keySet()) {
-            hotPlayersAndItems.get(player).removeIf(s -> {
-                for (String listing : hotListings.keySet()) {
-                    if (hotListings.get(listing).get(0).equals(s))
-                        return true;
-                }
-                return false;
-            });
-        }
+        hotPlayersAndItems.removeIf( s -> {
+            for (Pair<String, String> listing : hotListings) {
+                if (listing.getSecond().equals(s.getSecond()))
+                    return true;
+            }
+            return false;
+        });
     }
 
     void start() throws Exception {
@@ -324,8 +325,10 @@ public class Performance {
 
         if (benchmarkMode.equals("store")) {
             hotPlayersAndItems = readHotPlayerRecords(res.getString("hotPlayers"));
+            populateHotPlayers();
             populateHotItems();
             hotListings = readHotListingRecords(res.getString("hotListings"));
+            populateHotListings();
             removeAlreadyListedRecords();
         } else if (benchmarkMode.equals("tpcc")) {
             populateHotWarehouses();
@@ -471,6 +474,21 @@ public class Performance {
 
     }
 
+    private void populateHotListings() {
+        for (Pair<String, String> listing: hotListings
+             ) {
+            readOnlyHotListings.add(listing.getFirst());
+        }
+    }
+
+    private void populateHotPlayers() {
+        for (Pair<String, String> item:
+             hotPlayersAndItems) {
+            if (!hotPlayers.contains(item.getFirst()))
+                hotPlayers.add(item.getFirst());
+        }
+    }
+
     private void populateHotWarehouses() {
 
         List<Integer> allWarehouses = new ArrayList<>();
@@ -527,8 +545,8 @@ public class Performance {
     }
 
     private void populateHotItems() {
-        for (String player : hotPlayersAndItems.keySet()) {
-            hotItems.addAll(hotPlayersAndItems.get(player));
+        for (Pair<String, String> player : hotPlayersAndItems) {
+            hotItems.add(player.getSecond());
         }
     }
 
@@ -608,7 +626,7 @@ public class Performance {
 
 
         long sendStartMicro = System.nanoTime() / 1000;
-        TPCCServerRequest request = new TPCCServerRequest(TPCCServerRequest.Type.NEW_ORDER, txId++, values, sendStartMicro, userAbort);
+        TPCCServerRequest request = new TPCCServerRequest(TPCCServerRequest.Type.NEW_ORDER, txId.getAndIncrement(), values, sendStartMicro, userAbort);
         request.setArrayValues(arrayValues);
         return request;
     }
@@ -644,56 +662,64 @@ public class Performance {
         );
 
         long sendStartMicro = System.nanoTime() / 1000;
-        return new TPCCServerRequest(TPCCServerRequest.Type.PAYMENT, txId++, values, sendStartMicro, false);
+        return new TPCCServerRequest(TPCCServerRequest.Type.PAYMENT, txId.getAndIncrement(), values, sendStartMicro, false);
     }
 
+    /* Should be thread safe*/
     private StoreServerRequest getStoreServerRequest() {
         //        TODO: Change to correct tx selection
         int chance = random.nextInt(100); // Generates a random number between 0 (inclusive) and 100 (exclusive)
         int currBuyOrSell = buy_or_sell.incrementAndGet();
         if (chance < HOT_RECORD_SELECTION_CHANCE) {
             buy_or_sell_hot.incrementAndGet();
-            List<String> playersAsList = new ArrayList<>(hotPlayersAndItems.keySet());
-            List<String> playersWhoCanSell = playersAsList.stream().filter(record -> !hotPlayersAndItems.get(record).isEmpty()).toList();
-
-            if (hotListings.isEmpty() && playersWhoCanSell.isEmpty())
+            if (hotListings.isEmpty() && hotPlayersAndItems.isEmpty())
                 return null;
 
-            if (hotListings.isEmpty())
-                buy_or_sell_hot.set(1); // FORCE SELL
-            else if (playersWhoCanSell.isEmpty())
-                buy_or_sell_hot.set(2); // FORCE BUY
+            StoreServerRequest request = null;
+            while (request == null) {
+                if (hotListings.isEmpty())
+                    buy_or_sell_hot.set(1); // FORCE SELL
+                else if (hotPlayersAndItems.isEmpty())
+                    buy_or_sell_hot.set(2); // FORCE BUY
 
-            if (buy_or_sell_hot.get() % 2 == 0) {
-                //buy
-                Map<String, String> tx = new HashMap<>();
-                String randomPlayer = playersAsList.get(random.nextInt(playersAsList.size()));
+                if (buy_or_sell_hot.get() % 2 == 0) { // buy
 
-                List<String> listingsAsList = new ArrayList<>(hotListings.keySet());
-                String randomListing = listingsAsList.get(random.nextInt(listingsAsList.size()));
-                // Get the list associated with this random key
-//                List<String> randomValues = hotPlayersAndItems.get(randomKey);
-                tx.put("PId", randomPlayer);
-                tx.put("LId", randomListing);
-                tx.put("IId", hotListings.get(randomListing).get(0));
-                tx.put("price", hotListings.get(randomListing).get(1));
-                hotListings.remove(randomListing);
-                long sendStartMicro = System.nanoTime() / 1000;
-                return new StoreServerRequest(StoreServerRequest.Type.BUY_HOT, txId++, tx, sendStartMicro);
-            } else {
-                //sell
-                Map<String, String> tx = new HashMap<>();
-                String randomPlayer = playersWhoCanSell.get(random.nextInt(playersWhoCanSell.size()));
+                    Pair<String, String> randomListing;
+                    try {
+                         randomListing = hotListings.remove();
+                         readOnlyHotListings.remove(randomListing.getFirst());
+                    } catch (NoSuchElementException e) {
+                        buy_or_sell_hot.incrementAndGet();
+                        continue;
+                    }
+                    String randomPlayer = hotPlayers.get(random.nextInt(hotPlayers.size()));
 
-                List<String> randomValues = new ArrayList<>(hotPlayersAndItems.get(randomPlayer));
-                String randomItem = randomValues.get(random.nextInt(randomValues.size()));
 
-                tx.put("PId", randomPlayer);
-                tx.put("IId", randomItem);
-                hotPlayersAndItems.get(randomPlayer).remove(randomItem);
-                long sendStartMicro = System.nanoTime() / 1000;
-                return new StoreServerRequest(StoreServerRequest.Type.SELL_HOT, txId++, tx, sendStartMicro);
+                    Map<String, String> tx = new HashMap<>();
+                    tx.put("PId", randomPlayer);
+                    tx.put("LId", randomListing.getFirst());
+                    long sendStartMicro = System.nanoTime() / 1000;
+                    request = new StoreServerRequest(StoreServerRequest.Type.BUY_HOT, txId.getAndIncrement(), tx, sendStartMicro);
+                }
+                else {
+                    //sell
+                    Pair<String, String> hotPlayersAndItem;
+                    try {
+                        hotPlayersAndItem = hotPlayersAndItems.remove();
+                    } catch (NoSuchElementException e) {
+                        buy_or_sell_hot.incrementAndGet();
+                        continue;
+                    }
+
+                    Map<String, String> tx = new HashMap<>();
+                    tx.put("PId", hotPlayersAndItem.getFirst());
+                    tx.put("IId", hotPlayersAndItem.getSecond());
+                    long sendStartMicro = System.nanoTime() / 1000;
+                    request = new StoreServerRequest(StoreServerRequest.Type.SELL_HOT, txId.getAndIncrement(), tx, sendStartMicro);
+                }
             }
+            return request;
+
         } else {
             Map<String, String> tx = new HashMap<>();
             if (currBuyOrSell % 2 == 0) {
@@ -705,7 +731,7 @@ public class Performance {
                 }
                 else {
                     lid = String.valueOf(nextNotHotListingID.incrementAndGet());
-                    while (alreadyBoughtListing.contains(lid) || hotListings.containsKey(lid))
+                    while (alreadyBoughtListing.contains(lid) || readOnlyHotListings.contains(lid))
                         lid = String.valueOf(nextNotHotListingID.incrementAndGet());
                     pid = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
                 }
@@ -714,7 +740,7 @@ public class Performance {
                 tx.put("PId", pid);
                 tx.put("LId", lid);
                 long sendStartMicro = System.nanoTime() / 1000;
-                return new StoreServerRequest(StoreServerRequest.Type.BUY, txId++, tx, sendStartMicro);
+                return new StoreServerRequest(StoreServerRequest.Type.BUY, txId.getAndIncrement(), tx, sendStartMicro);
             } else {
 //                nextNotHotPlayer.updateAndGet(player -> {
 //                    if (player >= NUM_OF_PLAYERS) {
@@ -725,7 +751,7 @@ public class Performance {
 //                });
 
                 int randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
-                while (hotPlayersAndItems.containsKey(String.valueOf(randomPlayer)))
+                while (hotPlayers.contains(String.valueOf(randomPlayer)))
                     randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
 
 
@@ -734,7 +760,7 @@ public class Performance {
                 tx.put("PId", String.valueOf(randomPlayer));
                 tx.put("IId", String.valueOf(randomItem));
                 long sendStartMicro = System.nanoTime() / 1000;
-                return new StoreServerRequest(StoreServerRequest.Type.SELL, txId++, tx, sendStartMicro);
+                return new StoreServerRequest(StoreServerRequest.Type.SELL, txId.getAndIncrement(), tx, sendStartMicro);
             }
         }
     }
@@ -841,12 +867,14 @@ public class Performance {
         else if (request.getType() == StoreServerRequest.Type.BUY_HOT) {
             result = client.buyListing(request.getValues().get("PId"), request.getValues().get("LId"));
             if (result.isSuccess()) {
-                hotPlayersAndItems.get(request.getValues().get("PId")).add(result.getMessage());
+                hotPlayersAndItems.add(new Pair<>(request.getValues().get("PId"), result.getMessage()));
             }
             else {
                 stats.addWaistedTime(result.getStart());
-                if (!isGoingToRetry(request))
-                    hotListings.put(request.getValues().get("LId"), List.of(request.getValues().get("IId"), request.getValues().get("price")));
+                if (!isGoingToRetry(request)) {
+                    readOnlyHotListings.add(request.getValues().get("LId"));
+                    hotListings.add(new Pair<>(request.getValues().get("LId"), request.getValues().get("IId")));
+                }
                 log.error("Unsuccessful buy {}", request.getValues());
                 submitRetry(request, stats);
             }
@@ -854,18 +882,16 @@ public class Performance {
         else if (request.getType() == StoreServerRequest.Type.SELL_HOT) {
             result = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1);
             if (result.isSuccess()) {
-                hotListings.put(result.getMessage(), List.of(request.getValues().get("IId"), "1"));
-            }
-            else {
+                readOnlyHotListings.add(result.getMessage());
+                hotListings.add(new Pair<>(result.getMessage(), request.getValues().get("IId")));
+            } else {
                 stats.addWaistedTime(result.getStart());
                 if (!isGoingToRetry(request))
-                    hotPlayersAndItems.get(request.getValues().get("PId")).add(request.getValues().get("IId"));
+                    hotPlayersAndItems.add(new Pair<>(request.getValues().get("PId"), request.getValues().get("IId")));
                 log.error("Unsuccessful sell {}", request.getValues());
                 submitRetry(request, stats);
             }
         }
-
-
 
 
         if (result.isSuccess()) {

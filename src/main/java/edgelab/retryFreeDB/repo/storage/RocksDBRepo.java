@@ -137,12 +137,11 @@ public class RocksDBRepo implements KeyValueRepository{
             log.info("{}: remove {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String key = getKey(data);
 
-            Map<String, String> initValue = rocksDB.get(key);
+            Map<String, String> initValue = rocksDB.remove(key);
 //            if (initValue != null)
 //                tx.appendWAL(initValue);
 
 //            rocksDB.delete(key.getBytes());
-            rocksDB.remove(key);
 
 //        } catch (RocksDBException e) {
 //            log.error("{}: Could not delete <{}:{}>", tx.getTimestamp(), data.getTable(), data.getIds());
@@ -156,6 +155,7 @@ public class RocksDBRepo implements KeyValueRepository{
             log.info("{}: update {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String key = getKey(data);
 
+            /* There is a logical lock on the key*/
             Map<String, String> value = rocksDB.get(key);
             if (value == null)
                 throw new RocksDBException("not existed");
