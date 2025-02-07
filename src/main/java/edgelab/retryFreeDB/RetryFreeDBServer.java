@@ -196,7 +196,7 @@ public class RetryFreeDBServer {
             return unlock(request, tx);
         }
 
-        private Result unlock(Data request, DBTransaction tx) {
+        public Result unlock(Data request, DBTransaction tx) {
             if (isTransactionInvalid(tx))
                 return Result.newBuilder().setStatus(false).setMessage("Could not unlock - tx is invalid").build();
 
@@ -287,19 +287,18 @@ public class RetryFreeDBServer {
 
         private void abortTransactionsThatNeedsToBeAborted() {
             while(true) {
-                if (toBeAbortedTransactions.isEmpty()) {
+                if (!toBeAbortedTransactions.isEmpty()) {
 //                    log.info("waiting");
-                    try {
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        throw new RuntimeException(e);
-                    }
-                } else {
+//                    try {
+//                        Thread.sleep(1);
+//                    } catch (InterruptedException e) {
+//                        throw new RuntimeException(e);
+//                    }
+//                } else {
 
                     for (DBTransaction tx : toBeAbortedTransactions) {
                         log.info("{}: needs to be aborted Try to abort.", tx);
                         log.info("abort size: {}", toBeAbortedTransactions.size());
-                        Connection conn = tx.getConnection();
                         try {
                             repo.rollback(tx, toBeAbortedTransactions);
                             transactions.remove(tx);
@@ -371,6 +370,7 @@ public class RetryFreeDBServer {
                         .putReturns("unlocking_time", String.valueOf(tx.getUnlockingTime()))
                         .putReturns("committing_time", String.valueOf(tx.getCommittingTime()))
                         .putReturns("waiting_for_others_time", String.valueOf(tx.getWaitingForOthersTime()))
+                        .putReturns("rolling_back_time", String.valueOf(tx.getRollingBackTime()))
                         .setMessage("released").build();
             } catch (Exception e) {
                 return Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build();
@@ -380,24 +380,34 @@ public class RetryFreeDBServer {
 
         @Override
         public void rollBackTransaction(TransactionId transactionId, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(transactionId.getId(), responseObserver)) return;
-
-            rollBackTransactionWithoutInitialCheck(transactionId.getId(), responseObserver, true);
+            Result result = rollBackTransaction(transactionId);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
         }
 
-        private void rollBackTransactionWithoutInitialCheck(String transactionId, StreamObserver<Result> responseObserver, boolean finalStatus) {
-            DBTransaction tx = transactions.get(transactionId);
+        public Result rollBackTransaction(TransactionId transactionId) {
+            DBTransaction tx = transactions.get(transactionId.getId());
+            return rollBackTransaction(tx);
+        }
+
+
+
+
+        public Result rollBackTransaction(DBTransaction tx) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not rollback - tx is invalid").build();
             try {
+                tx.startRollingBack();
                 repo.rollback(tx, toBeAbortedTransactions);
                 transactions.remove(tx.toString());
                 log.warn("{}, Transaciton rollbacked, total waiting time: {}", tx, tx.getWaitingTime());
-                responseObserver.onNext(Result.newBuilder().setStatus(finalStatus)
-                        .putReturns("waiting_time", String.valueOf(tx.getWaitingTime())).setMessage("rollbacked").build());
-                responseObserver.onCompleted();
-            } catch (Exception e) {
+                tx.finishRollingBack();
 
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Could not rollback and release the locks").build());
-                responseObserver.onCompleted();
+
+                return Result.newBuilder().setStatus(true).putReturns("waiting_time", String.valueOf(tx.getWaitingTime())).setMessage("rollbacked").build();
+            } catch (Exception e) {
+                tx.finishRollingBack();
+                return Result.newBuilder().setStatus(false).setMessage("Could not rollback and release the locks").build();
             }
         }
 

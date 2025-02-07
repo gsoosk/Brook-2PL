@@ -405,8 +405,13 @@ public class Performance {
         for (int i = 0; i < MAX_THREADS; i++) {
             executor.submit(() -> {
                 while (stats.isRunning()) {
-                    ServerRequest request = getNextRequest(benchmarkMode);
-                    executeRequestFromThreadPool(request, stats);
+                    try {
+                        ServerRequest request = getNextRequest(benchmarkMode);
+                        executeRequestFromThreadPool(request, stats);
+                    }
+                    catch (Exception e) {
+                        log.error("ERROR IN THREAD EXECUTING: {}", e.getMessage());
+                    }
                 }
             });
         }
@@ -832,7 +837,12 @@ public class Performance {
                         Long.parseLong(result.getMetrics().get("waiting_time")),
                         Long.parseLong(result.getMetrics().get("io_time")),
                         Long.parseLong(result.getMetrics().get("locking_time")),
-                        Long.parseLong(result.getMetrics().get("retiring_time")), Long.parseLong(result.getMetrics().get("initiation_time")), Long.parseLong(result.getMetrics().get("unlocking_time")), Long.parseLong(result.getMetrics().get("committing_time")), Long.parseLong(result.getMetrics().get("waiting_for_others_time")));
+                        Long.parseLong(result.getMetrics().get("retiring_time")),
+                        Long.parseLong(result.getMetrics().get("initiation_time")),
+                        Long.parseLong(result.getMetrics().get("unlocking_time")),
+                        Long.parseLong(result.getMetrics().get("committing_time")),
+                        Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
+                        Long.parseLong(result.getMetrics().get("rolling_back_time")));
                 log.info("request successful {}:{}", request.getType(),request.getValues());
             }
             return null;
@@ -908,7 +918,8 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("initiation_time")),
                     Long.parseLong(result.getMetrics().get("unlocking_time")),
                     Long.parseLong(result.getMetrics().get("committing_time")),
-                    Long.parseLong(result.getMetrics().get("waiting_for_others_time")));
+                    Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
+                    Long.parseLong(result.getMetrics().get("rolling_back_time")));
             log.info("request successful {}", request.getValues());
         }
     }
@@ -1382,6 +1393,7 @@ public class Performance {
         private AtomicLong unlockingTime;
         private AtomicLong committingTime;
         private AtomicLong waitingForOthersTime;
+        private AtomicLong rollingBackTime;
 
         private int itemCount;
 
@@ -1435,6 +1447,7 @@ public class Performance {
             this.unlockingTime = new AtomicLong(0);
             this.committingTime = new AtomicLong(0);
             this.waitingForOthersTime = new AtomicLong(0);
+            this.rollingBackTime = new AtomicLong(0);
             this.running = new AtomicBoolean(true);
             this.warmup = new AtomicBoolean(true);
             this.count = new AtomicLong(0);
@@ -1449,7 +1462,7 @@ public class Performance {
 
                 // Check if the file already exists to avoid overwriting it
                 if (!Files.exists(path)) {
-                    String CSVHeader = "num of records, mode, operation_delay, hot_records, prob, threads, throughput(tx/s), item_read(tx/s), request_retried, total_retries, avg_retry_per_request, avg_latency, max_latency, 50th_latency, 95th_latency, 99th_latency, 99.9th_latency, useful_time, waited_time, wasted_time, io_time, locking_time, retiring_time, initiation_time, unlocking_time, committing_time, waiting_for_others_time\n";
+                    String CSVHeader = "num of records, mode, operation_delay, hot_records, prob, threads, throughput(tx/s), item_read(tx/s), request_retried, total_retries, avg_retry_per_request, avg_latency, max_latency, 50th_latency, 95th_latency, 99th_latency, 99.9th_latency, useful_time, waited_time, wasted_time, io_time, locking_time, retiring_time, initiation_time, unlocking_time, committing_time, waiting_for_others_time, rolling_back_time\n";
                     BufferedWriter out = new BufferedWriter(new FileWriter(resultFilePath));
 
                     // Writing the header to output stream
@@ -1549,7 +1562,7 @@ public class Performance {
             int numOfRetries = retries.size();
             int totalRetries = retries.values().stream().mapToInt(Integer::intValue).sum();
             Double avgRetryPerReq = retries.isEmpty() ? 0.0 : retries.values().stream().mapToInt(Integer::intValue).average().getAsDouble();
-            System.out.printf("%d records sent, %f records/sec (%.3f KB/sec), %.3f items/sec, %.2f μs avg latency, %.2f μs max latency, %d μs 50th, %d μs 95th, %d μs 99th, %d μs 99.9th.%n --  requests retried: %d, retries: %d, avg retry per request: %.2f, useful work time: %d, waited time: %d, wasted time: %d, IO time: %d, Locking time: %d, retiringTime: %d, initiationTime: %d, unlockingTime: %d, committingTime: %d, waitingForOthersTime: %d\n",
+            System.out.printf("%d records sent, %f records/sec (%.3f KB/sec), %.3f items/sec, %.2f μs avg latency, %.2f μs max latency, %d μs 50th, %d μs 95th, %d μs 99th, %d μs 99.9th.%n --  requests retried: %d, retries: %d, avg retry per request: %.2f, useful work time: %d, waited time: %d, wasted time: %d, IO time: %d, Locking time: %d, retiringTime: %d, initiationTime: %d, unlockingTime: %d, committingTime: %d, waitingForOthersTime: %d, rollingBackTime: %d\n",
                     count.get(),
                     recsPerSec,
                     mbPerSec,
@@ -1572,12 +1585,13 @@ public class Performance {
                     initiationTime.get(),
                     unlockingTime.get(),
                     committingTime.get(),
-                    waitingForOthersTime.get()
+                    waitingForOthersTime.get(),
+                    rollingBackTime.get()
                     );
 
             System.out.println("");
 
-            String resultCSV = String.format("%d,%s,%d,%s,%d,%d,%.2f,%.2f,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+            String resultCSV = String.format("%d,%s,%d,%s,%d,%d,%.2f,%.2f,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                     count.get(),
                     mode,
                     operationDelay,
@@ -1604,7 +1618,8 @@ public class Performance {
                     initiationTime.get(),
                     unlockingTime.get(),
                     committingTime.get(),
-                    waitingForOthersTime.get());
+                    waitingForOthersTime.get(),
+                    rollingBackTime.get());
             try {
                 BufferedWriter out = new BufferedWriter(
                         new FileWriter(resultFilePath, true));
@@ -1684,7 +1699,7 @@ public class Performance {
             this.itemCount++;
         }
 
-        public void addAblationTimes(long now, long start, long waitingTime, long ioTime, long lockingTime, long retiringTime, long initiationTime, long unlockingTime, long committingTime, long waitingForOthersTime) {
+        public void addAblationTimes(long now, long start, long waitingTime, long ioTime, long lockingTime, long retiringTime, long initiationTime, long unlockingTime, long committingTime, long waitingForOthersTime, long rollingBackTime) {
             this.usefulWorkTime.addAndGet(((now - start) - waitingTime) / 1000);
             this.waitedTime.addAndGet( waitingTime / 1000);
             this.ioTime.addAndGet( ioTime / 1000);
@@ -1694,6 +1709,7 @@ public class Performance {
             this.unlockingTime.addAndGet( unlockingTime / 1000);
             this.committingTime.addAndGet( committingTime / 1000);
             this.waitingForOthersTime.addAndGet( waitingForOthersTime / 1000);
+            this.rollingBackTime.addAndGet(rollingBackTime / 1000);
         }
 
         public void addWaistedTime(long start) {

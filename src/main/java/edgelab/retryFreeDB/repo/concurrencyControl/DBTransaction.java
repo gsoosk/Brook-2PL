@@ -2,10 +2,14 @@ package edgelab.retryFreeDB.repo.concurrencyControl;
 
 import lombok.Getter;
 import lombok.Setter;
+import org.jgrapht.alg.util.Pair;
 
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.List;
+import java.util.Map;
+import java.util.Optional;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -37,6 +41,8 @@ public class DBTransaction {
     private long committingTime;
     @Getter
     private long waitingForOthersTime;
+    @Getter
+    private long rollingBackTime;
 
     private long previousRetireStart = -1;
     private long previousWaitStart = -1;
@@ -45,12 +51,14 @@ public class DBTransaction {
     private long previousUnlockStart = -1;
     private long previousCommitStart = -1;
     private long previousWaitingForOthersStart = -1;
+    private long previousRollBackStart = -1;
 
     @Getter
     private final Set<String> resources = ConcurrentHashMap.newKeySet();
     private final AtomicInteger commitSemaphore;
 
-    private List<byte[]> WAL;
+    @Getter
+    private final Map<String, Optional<Map<String, String>>> WAL;
     public DBTransaction(String timestamp) {
 
         this.timestamp = timestamp;
@@ -64,7 +72,8 @@ public class DBTransaction {
         this.unlockingTime = 0;
         this.committingTime = 0;
         this.waitingForOthersTime = 0;
-        this.WAL = new ArrayList<>();
+        this.rollingBackTime = 0;
+        this.WAL = new ConcurrentHashMap<>();
     }
 
     @Override
@@ -131,6 +140,8 @@ public class DBTransaction {
 
     public void startWaitingForOthers() {previousWaitingForOthersStart = System.nanoTime();}
 
+    public void startRollingBack() { previousRollBackStart = System.nanoTime(); }
+
 
     public void wakesUp() {
         if (previousWaitStart != -1)
@@ -170,8 +181,15 @@ public class DBTransaction {
         if (previousWaitingForOthersStart != -1)
             this.waitingForOthersTime += (System.nanoTime() - previousWaitingForOthersStart);
     }
-
-    public void appendWAL(byte[] initValue) {
-        this.WAL.add(initValue);
+    public void finishRollingBack() {
+        if (previousRollBackStart != -1)
+            this.rollingBackTime += (System.nanoTime() - previousRollBackStart);
     }
+    public void appendWAL(String key, Map<String, String> initValue) {
+        if (!this.WAL.containsKey(key))
+            this.WAL.put(key, Optional.ofNullable(initValue));
+    }
+
+
+
 }

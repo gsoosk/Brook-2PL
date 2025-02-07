@@ -915,51 +915,55 @@ public class StoredProcedureClient extends Client{
 
     public TransactionResult addListingWW(String PId, String IId, double price) {
 
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
         TransactionResult res = new TransactionResult();
-        if (initResult.getStatus()) {
-            String transactionId = initResult.getMessage();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
             try {
 //
-//            Map<String, String> listing = read(transactionId, "Listings", "LIId", IId);
+//            Map<String, String> listing = read(dbTransaction, "Listings", "LIId", IId);
 ////            Check no listing exists with the item id
 //            if (!listing.isEmpty()) {
 //                log.info("listing exists");
-//                commit(transactionId);
+//                commit(dbTransaction);
 //                return;
 //            }
 
-                lock(transactionId, "Items", "IId", IId, READ_TYPE);
-                Map<String, String> item = read(transactionId, "Items", "IId", IId);
+                lock(dbTransaction, "Items", "IId", IId, READ_TYPE);
+                Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
                 if (item.isEmpty()) {
                     log.info("Item does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 //             Check the owner
                 if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
                     log.info("item has a different owner! {}<>{}", item.get("iowner"), PId);
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
-                lock(transactionId, "Players", "PId", PId, READ_TYPE);
-                Map<String, String> player = read(transactionId, "Players", "PId", PId);
+                lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 //            Check player exists
                 if (player.isEmpty()) {
                     log.info("player does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
-                Result insertListingResult = insertLock(transactionId, "Listings");
+                Result insertListingResult = insertLock(dbTransaction, "Listings");
                 String listingRecordId = insertListingResult.getMessage();
-                insert(transactionId, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
-                getCommitResult(transactionId, res);
+                insert(dbTransaction, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
+                getCommitResult(dbTransaction, res);
                 res.setMessage(listingRecordId);
                 return res;
             } catch (Exception e) {
-                rollback(transactionId);
+                rollback(dbTransaction);
                 return res;
             }
         }
@@ -1146,9 +1150,13 @@ public class StoredProcedureClient extends Client{
         return retireResult;
     }
     private void rollback(String transactionId) {
-        Result rollbackRes = blockingStub.rollBackTransaction(TransactionId.newBuilder().setId(transactionId).build());
-        locks.remove(transactionId);
+        Result rollbackRes = dbService.rollBackTransaction(TransactionId.newBuilder().setId(transactionId).build());
     }
+
+    private void rollback(DBTransaction tx) {
+        Result rollbackRes = dbService.rollBackTransaction(tx);
+    }
+
 
     //    Remote calls: 4
     public TransactionResult addListingSLW(String PId, String IId, double price) {
@@ -1191,7 +1199,7 @@ public class StoredProcedureClient extends Client{
 
             } catch (Exception e) {
                 log.error(e.getMessage());
-                rollback(dbTransaction.getTimestamp());
+                rollback(dbTransaction);
                 return res;
             }
         }
@@ -1207,133 +1215,98 @@ public class StoredProcedureClient extends Client{
     }
     public TransactionResult buyListingWW(String PId, String LId) {
 
-        long time = System.nanoTime();
-        log.error("{}:{} 0", "NA", System.nanoTime() - time);
-        time = System.nanoTime();
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
-        log.error("{}:{} init tx", initResult.getMessage(), System.nanoTime() - time);
-        time = System.nanoTime();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+        } catch (SQLException e) {
+            return res;
+        }
 
-        if (initResult.getStatus()) {
-            String transactionId = initResult.getMessage();
+        if (dbTransaction != null) {
             try {
 
                 //            R from L where Lid
-                lock(transactionId, "Listings", "LId", LId, READ_TYPE);
-                log.error("{}:{} lock 1", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Listings", "LId", LId, READ_TYPE);
 
-                Map<String, String> listing = read(transactionId, "Listings", "LId", LId);
-                log.error("{}:{} read 1", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                Map<String, String> listing = read(dbTransaction, "Listings", "LId", LId);
 //            Check player exists
                 if (listing.isEmpty()) {
                     log.info("listing does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
                 //            Read from P where pid
-                lock(transactionId, "Players", "PId", PId, READ_TYPE);
-                log.error("{}:{} lock 2", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
 
 //            TODO: WE MIGHT NEED TO ROLLBACK
-                Map<String, String> player = read(transactionId, "Players", "PId", PId);
-                log.error("{}:{} read 2", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 
 //            Check player exists
                 if (player.isEmpty()) {
                     log.info("player does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
                 //            Check players cash for listing
                 if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
                     log.info("player does not have enough cash");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 
 //            Read from I where LIID
-                lock(transactionId, "Items", "IId", listing.get("liid"), READ_TYPE);
-                log.error("{}:{} lock 3", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
-                Map<String, String> item = read(transactionId, "Items", "IId", listing.get("liid"));
-                log.error("{}:{} read 3", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Items", "IId", listing.get("liid"), READ_TYPE);
+                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("liid"));
+
                 //            Check item exists
                 if (item.isEmpty()) {
                     log.info("item does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 
 //            Delete from L where LID
-                lock(transactionId, "Listings", "LId", LId, WRITE_TYPE);
-                log.error("{}:{} lock 4", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
-                delete(transactionId, "Listings", "LId", LId);
-                log.error("{}:{} delete 1", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Listings", "LId", LId, WRITE_TYPE);
+                delete(dbTransaction, "Listings", "LId", LId);
 
 
 //            R from P where ppid
                 String PPId = item.get("iowner");
-                lock(transactionId, "Players", "PId", PPId, READ_TYPE);
-                log.error("{}:{} lock 5", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Players", "PId", PPId, READ_TYPE);
 
-                Map<String, String> prevOwner = read(transactionId, "Players", "PId", PPId);
-                log.error("{}:{} read 5", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
                 //            Check prevOwner exists
                 if (prevOwner.isEmpty()) {
                     log.info("previous owner does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 //          W into I where IId = Liid SET Iowner = pid
-                lock(transactionId, "Items", "IId", listing.get("liid"), WRITE_TYPE);
-                log.error("{}:{} lock 6", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
-                write(transactionId, "Items", "IId", listing.get("liid"), "IOwner", PId);
-                log.error("{}:{} write 6", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Items", "IId", listing.get("liid"), WRITE_TYPE);
+                write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
 
 //           W into P where Pid SET pCash = new Cash
-                lock(transactionId, "Players", "PId", PId, WRITE_TYPE);
-                log.error("{}:{} lock 7", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Players", "PId", PId, WRITE_TYPE);
                 String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
-                write(transactionId, "Players", "PId", PId, "Pcash", newCash);
-                log.error("{}:{} write 7", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                write(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
 
 //           W into P where Pid SET pCash = new Cash
-                lock(transactionId, "Players", "PId", PPId, WRITE_TYPE).getStatus();
-                log.error("{}:{} lock 8", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                lock(dbTransaction, "Players", "PId", PPId, WRITE_TYPE).getStatus();
                 String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
-                write(transactionId, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
-                log.error("{}:{} write 8", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                write(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
 
 //            Unlock
-                getCommitResult(transactionId, res);
-                log.error("{}:{} commit ", initResult.getMessage(), System.nanoTime() - time);
-                time = System.nanoTime();
+                getCommitResult(dbTransaction, res);
                 res.setMessage(listing.get("liid"));
-                log.error("{}: log :{},{} ", initResult.getMessage(),res.getMetrics() , System.nanoTime() - time);
                 return res;
             } catch (Exception e) {
-                rollback(transactionId);
+                rollback(dbTransaction);
                 return res;
             }
         }
@@ -1341,11 +1314,6 @@ public class StoredProcedureClient extends Client{
     }
 
     public TransactionResult buyListingSLW(String PId, String LId) {
-        long time = System.nanoTime();
-        long start = System.nanoTime();
-//        log.error("{}:{} 0", "NA", System.nanoTime() - time);
-        time = System.nanoTime();
-
         TransactionResult res = new TransactionResult();
         log.info("buy listing <PID:{}, LID:{}>", PId, LId);
         DBTransaction dbTransaction = null;
@@ -1357,17 +1325,11 @@ public class StoredProcedureClient extends Client{
         if (dbTransaction != null) {
 
 
-//            log.error("{}:{} 1", transactionId, System.nanoTime() - time);
-            time = System.nanoTime();
             try {
                 //            R from L where Lid
                 lock(dbTransaction, "Listings", "LId", LId);
-//                log.error("{}:{} 2", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
                 Map<String, String> listing = read(dbTransaction, "Listings", "LId", LId);
-//                log.error("{}:{} 3", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
 //            Check player exists
                 if (listing.isEmpty()) {
@@ -1378,12 +1340,8 @@ public class StoredProcedureClient extends Client{
 
 //            Read from I where LIID
                 lock(dbTransaction, "Items", "IId", listing.get("liid"));
-//                log.error("{}:{} 4", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
                 Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("liid"));
-//                log.error("{}:{} 5", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
                 //            Check item exists
                 if (item.isEmpty()) {
@@ -1401,13 +1359,9 @@ public class StoredProcedureClient extends Client{
                     lock(dbTransaction, "Players", "PId", PPId);
                     lock(dbTransaction, "Players", "PId", PId);
                 }
-//                log.error("{}:{} 6", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
                 //            Read from P where pid
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
-//                log.error("{}:{} 7", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 //            Check player exists
                 if (player.isEmpty()) {
                     log.error("player does not exists!");
@@ -1424,9 +1378,6 @@ public class StoredProcedureClient extends Client{
 
 
                 Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
-//                log.error("{}:{} 8", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
-
                 //            Check prevOwner exists
                 if (prevOwner.isEmpty()) {
                     log.error("previous owner does not exists!");
@@ -1437,41 +1388,28 @@ public class StoredProcedureClient extends Client{
 
 //            Delete from L where LID
                 delete(dbTransaction, "Listings", "LId", LId);
-//                log.error("{}:{} 9", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
 //            unlock(transactionId, "Listings", "LId", LId);
 
 //          W into I where IId = Liid SET Iowner = pid
                 write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
-//                log.error("{}:{} 10", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
                 unlock(dbTransaction, "Items", "IId", listing.get("liid"));
-//                log.error("{}:{} 11", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
 //            delay(3000);
 //           W into P where Pid SET pCash = new Cash
                 String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
                 write(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
-//                log.error("{}:{} 12", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 
 //           W into P where Pid SET pCash = new Cash
                 String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
                 write(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
-//                log.error("{}:{} 13", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
 //            Unlock
                 getCommitResult(dbTransaction, res);
                 res.setMessage(listing.get("liid"));
-//                log.error("{}:{} 13", transactionId, System.nanoTime() - time);
-                time = System.nanoTime();
-//                log.error("{}:{}, {} tx", transactionId, res.getMetrics(), System.nanoTime() - res.getStart());
                 return res;
             } catch (Exception e) {
                 log.error(e.getMessage());
-                rollback(dbTransaction.getTimestamp());
+                rollback(dbTransaction);
                 return res;
             }
         }
@@ -1500,7 +1438,7 @@ public class StoredProcedureClient extends Client{
                 .setType(READ_TYPE)
                 .setKey(tableName + "," + key + "," + value)
                 .build();
-        Result unlockResult = dbService.unlock(lockData);
+        Result unlockResult = dbService.unlock(lockData, transaction);
         log.info("{}, unlock {},{}:{} status: {} - message: {}",transaction.getUnlockingTime(), tableName, key, value, unlockResult.getStatus(), unlockResult.getMessage());
         return unlockResult;
     }
@@ -1690,6 +1628,8 @@ public class StoredProcedureClient extends Client{
                 .build();
         Result lockResult = dbService.lock(transaction, lockData);
         log.info("{}, lock on {},{}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, key, value, lockResult.getStatus(), lockResult.getMessage());
+        if (!lockResult.getStatus())
+            throw new Exception(lockResult.getMessage());
         return lockResult;
     }
 
