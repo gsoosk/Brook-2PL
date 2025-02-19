@@ -8,6 +8,6 @@
         name: postgres
         tasks_from: init_sql.yml
       vars:
-        test_case: "tpcc" # tpcc | store
+        test_case: "store" # tpcc | store
         tpcc_scale: "32"
 

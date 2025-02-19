@@ -40,6 +40,7 @@ message Data{
   string key = 3; // <Table, Id(s), Query(s)> | Table (for insert)
   string value = 4; // <Variable, New Value> (only for write/update) | <,,,> (new record for insert)
   string recordId = 5; // optional: for insert
+  string recordKeys = 6; // optional for insert via rocksdb
 }
 //
 //message Key {

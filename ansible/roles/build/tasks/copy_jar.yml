@@ -7,5 +7,6 @@
 
 - name: copy file to remote
   copy:
-    src: "/tmp/app/target/{{jar}}.jar"
+    src: "app/code/target/{{jar}}.jar"
     dest: "./app/{{jar}}.jar"
+    remote_src: true

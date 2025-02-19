@@ -156,6 +156,25 @@
       <version>1.0.1</version>
     </dependency>
 
+    <!-- HikariCP Connection Pool -->
+    <dependency>
+      <groupId>com.zaxxer</groupId>
+      <artifactId>HikariCP</artifactId>
+      <version>6.2.1</version>
+    </dependency>
+
+    <dependency>
+      <groupId>org.rocksdb</groupId>
+      <artifactId>rocksdbjni</artifactId>
+      <version>8.3.2</version>
+    </dependency>
+    <dependency>
+      <groupId>com.fasterxml.jackson.core</groupId>
+      <artifactId>jackson-databind</artifactId>
+      <version>2.15.2</version>
+    </dependency>
+
+
 
   </dependencies>
 
@@ -281,6 +300,27 @@
                 <transformer implementation=
                                      "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
                   <mainClass>edgelab.retryFreeDB.RetryFreeDBServer</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+
+
+          <execution>
+            <id>3</id>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <finalName>InitStoreBenchmark</finalName>
+              <transformers>
+                <transformer implementation="org.apache.maven.plugins.shade.resource.ServicesResourceTransformer">
+
+                </transformer>
+                <transformer implementation=
+                                     "org.apache.maven.plugins.shade.resource.ManifestResourceTransformer">
+                  <mainClass>edgelab.retryFreeDB.init.InitStoreBenchmark</mainClass>
                 </transformer>
               </transformers>
             </configuration>

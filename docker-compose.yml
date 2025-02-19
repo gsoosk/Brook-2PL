@@ -5,7 +5,7 @@ services:
     container_name: postgres0_service
     image: postgres_slw:init
     environment:
-      POSTGRES_USER: user
+      POSTGRES_USER: username
       POSTGRES_PASSWORD: password
       POSTGRES_DB: postgres
       PGDATA: /data/postgres

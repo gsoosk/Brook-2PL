@@ -104,6 +104,22 @@
               </transformers>
             </configuration>
           </execution>
+          <execution>
+            <id>3</id>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <finalName>InitStoreBenchmark</finalName>
+              <transformers>
+                <transformer />
+                <transformer>
+                  <mainClass>edgelab.retryFreeDB.init.InitStoreBenchmark</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
     </plugins>

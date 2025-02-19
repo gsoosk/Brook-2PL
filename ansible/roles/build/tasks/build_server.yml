@@ -1,14 +1,14 @@
 - name: copy source
-  copy:
+  synchronize:
     src: ../../../src/
-    dest: /tmp/app/src/
+    dest: app/code/src/
  
 - name: copy pom
-  copy:
+  synchronize:
     src: ../../../pom.xml
-    dest: /tmp/app/pom.xml
+    dest: app/code/pom.xml
 
 - name: build
-  command: mvn clean install
+  command: mvn install
   args:
-    chdir: /tmp/app/
+    chdir: app/code/

@@ -8,8 +8,9 @@
 <!--        <Prometheus name="metrics"/>-->
     </Appenders>
     <Loggers>
-        <Root level="info">
-<!--        <Root level="error">-->
+<!--        <Root level="info">-->
+        <Root level="error">
+
 <!--        <Root level="off">-->
 
 <!--            <AppenderRef ref="metrics"/>-->

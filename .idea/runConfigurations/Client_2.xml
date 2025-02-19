@@ -1,0 +1,16 @@
+<component name="ProjectRunConfigurationManager">
+  <configuration default="false" name="Client 2" type="Application" factoryName="Application">
+    <option name="MAIN_CLASS_NAME" value="edgelab.retryFreeDB.clients.InteractiveClient" />
+    <module name="slwgraph" />
+    <option name="PROGRAM_PARAMETERS" value="localhost 8000" />
+    <extension name="coverage">
+      <pattern>
+        <option name="PATTERN" value="edgelab.retryFreeDB.clients.*" />
+        <option name="ENABLED" value="true" />
+      </pattern>
+    </extension>
+    <method v="2">
+      <option name="Make" enabled="true" />
+    </method>
+  </configuration>
+</component>

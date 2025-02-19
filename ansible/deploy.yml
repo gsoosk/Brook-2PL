@@ -1,6 +1,6 @@
 - name: Build server files
   hosts:
-    - localhost
+    - servers
   tasks:
     - include_role:
         name: build
@@ -32,6 +32,22 @@
         tasks_from: copy_jar.yml
       vars:
         jar: Server
+
+    - include_role:
+        name: build
+        tasks_from: copy_jar.yml
+      vars:
+        jar: InitStoreBenchmark
+
+- name: Copy test files to server
+  hosts:
+    - servers
+  become: yes
+  tasks:
+    - include_role:
+        name: build
+        tasks_from: test_init.yml
+
 
 #    - include_role:
 #        name: build

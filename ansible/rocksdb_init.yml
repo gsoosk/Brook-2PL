@@ -1,0 +1,23 @@
+---
+- name: init rocksdb
+  hosts: servers
+  become: true
+
+  vars:
+    CHECKPOINT: "rocksdb/checkpoint"
+    INITIALIZER: "app/InitStoreBenchmark.jar"
+    HOTSPOTS: "rocksdb/hotspots"
+
+  tasks:
+    - name: Create target directory
+      file:
+        path: rocksdb
+        state: directory
+        mode: 0755
+
+    - name: Run initializer
+      command: "java -jar {{ INITIALIZER }} {{ CHECKPOINT }} {{HOTSPOTS}}"
+
+
+
+

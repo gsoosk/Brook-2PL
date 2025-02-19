@@ -1,7 +1,7 @@
 FROM postgres:16-alpine
 
 # Set environment variables
-ENV POSTGRES_USER user
+ENV POSTGRES_USER username
 ENV POSTGRES_PASSWORD password
 ENV POSTGRES_DB postgres
 ENV PGDATA /data/postgres

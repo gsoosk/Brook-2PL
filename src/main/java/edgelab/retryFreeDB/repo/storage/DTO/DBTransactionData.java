@@ -82,6 +82,7 @@ public class DBTransactionData {
         else if (d instanceof DBInsertData) {
             ((DBInsertData) d).setNewRecord(data.getValue());
             ((DBInsertData) d).setRecordId(data.getRecordId());
+            ((DBInsertData) d).setRecordKeys(data.getRecordKeys());
         }
 
 

@@ -1,8 +1,6 @@
 package edgelab.retryFreeDB.slwGraph;
 
-import edgelab.retryFreeDB.Client;
 import edgelab.retryFreeDB.slwGraph.nodes.ReadNode;
-import edgelab.retryFreeDB.slwGraph.nodes.UpdateNode;
 import edgelab.retryFreeDB.slwGraph.nodes.WriteNode;
 
 import java.util.List;

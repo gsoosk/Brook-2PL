@@ -1,0 +1,24 @@
+- name: Create target directory
+  file:
+    path: test
+    state: directory
+    mode: 0755
+
+
+- name: copy docker compose to remote
+  synchronize:
+    src: "docker-compose.yml"
+    dest: "./test/docker-compose.yml"
+
+- name: copy test shell to remote
+  copy:
+    src: "test.sh"
+    dest: "./test/test.sh"
+    mode: 755
+
+- name: copy test shell to remote
+  copy:
+    src: "test_server.sh"
+    dest: "./test/test_server.sh"
+    owner: "cc"
+    mode: 755

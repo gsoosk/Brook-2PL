@@ -3,10 +3,13 @@ package edgelab.retryFreeDB.benchmark;
 
 
 import edgelab.proto.RetryFreeDBServerGrpc;
-import edgelab.retryFreeDB.Client;
+import edgelab.retryFreeDB.clients.Client;
+import edgelab.retryFreeDB.clients.InteractiveClient;
 import edgelab.retryFreeDB.benchmark.util.RandomGenerator;
 import edgelab.retryFreeDB.benchmark.util.TPCCConfig;
 import edgelab.retryFreeDB.benchmark.util.TPCCUtil;
+import edgelab.retryFreeDB.clients.StoredProcedureClient;
+import edgelab.retryFreeDB.init.InitStoreBenchmark;
 import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.grpc.ManagedChannelBuilder;
@@ -23,6 +26,8 @@ import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.MutuallyExclusiveGroup;
 import net.sourceforge.argparse4j.inf.Namespace;
+import org.checkerframework.checker.units.qual.A;
+import org.jgrapht.alg.util.Pair;
 
 import java.io.BufferedReader;
 import java.io.BufferedWriter;
@@ -35,19 +40,16 @@ import java.nio.file.Files;
 import java.nio.file.Path;
 import java.nio.file.Paths;
 import java.rmi.RemoteException;
-import java.util.ArrayList;
-import java.util.Arrays;
-import java.util.Collections;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Random;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
 import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 import java.util.stream.Collectors;
 import java.util.stream.IntStream;
 
@@ -157,6 +159,7 @@ public class Performance {
 
         perf.parseArguments(args);
         perf.start();
+        System.exit(0);
 
     }
 
@@ -181,29 +184,34 @@ public class Performance {
 //    Multi-threading
     private int MAX_THREADS = 60;
     private int MAX_ITEM_READ_THREADS = 20;
-    private final int MAX_QUEUE_SIZE = 2;
+    private int MAX_QUEUE_SIZE = MAX_THREADS * 3;
     private int MAX_RETRY = -1;
     private ThreadPoolExecutor executor;
     private ThreadPoolExecutor itemExecutor;
     private Client client;
-    private long txId = 0;
-    private Map<String, Set<String>> hotPlayersAndItems; // Player:{items}
-    private List<String> hotItems = new ArrayList<>();
-    private Map<String, List<String>> hotListings; // Listing: <iid, price>
-    private Set<String> alreadyBoughtListing = new HashSet<>();
+    private final AtomicLong txId = new AtomicLong(0);
+    private ConcurrentLinkedQueue<Pair<String, String>> hotPlayersAndItems; // purchasable items pid,iid
+    private List<String> hotPlayers = new CopyOnWriteArrayList<>();
+    private final List<String> hotItems = new ArrayList<>(); // for read only tx
+    private ConcurrentLinkedQueue<Pair<String, String>> hotListings; // current listings: lid, iid
+    private final Set<String> readOnlyHotListings = ConcurrentHashMap.newKeySet();
+    private final Set<String> alreadyBoughtListing = ConcurrentHashMap.newKeySet();
+    private AtomicInteger nextNotHotListingID = new AtomicInteger(10);
+    private static final int initialNotHotPlayerIndex = (InitStoreBenchmark.NUM_OF_PLAYERS / 10);
+    private final Queue<Pair<String, String>> notHotListings = new ConcurrentLinkedQueue<>(); // lid , pid
     private int HOT_RECORD_SELECTION_CHANCE = 0;
-    private int NUM_OF_PLAYERS = 500000;
-    private int NUM_OF_LILSTINGS = 100000;
+    private final int NUM_OF_PLAYERS = InitStoreBenchmark.NUM_OF_PLAYERS;
+    private final int NUM_OF_LISTINGS = InitStoreBenchmark.NUM_OF_INITIAL_LISTINGS;
     private int NUM_OF_WAREHOUSES = 1;
     private int NUM_OF_HOT_WAREHOUSE = 0;
 
     private List<Integer> hotWarehouses = new ArrayList<>();
     private List<Integer> notHotWarehouses = new ArrayList<>();
-    private int buy_or_sell = 1;
-    private int buy_or_sell_hot = 1;
+    private AtomicInteger buy_or_sell = new AtomicInteger(1);
+    private AtomicInteger buy_or_sell_hot = new AtomicInteger(1);
     private final RandomGenerator random = new RandomGenerator(1234);
-    private static Map<String, Set<String>> readHotPlayerRecords(String filePath) {
-        Map<String, Set<String>> map = new ConcurrentHashMap<>();
+    private static ConcurrentLinkedQueue<Pair<String, String>> readHotPlayerRecords(String filePath) {
+        List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -211,29 +219,29 @@ public class Performance {
                 if (parts.length >= 2) {
                     String key = parts[1].trim(); // Second column as key
                     String value = parts[0].trim(); // First column as value
-
-                    // Check if the key exists and add the value to its list
-                    map.computeIfAbsent(key, k -> ConcurrentHashMap.newKeySet()).add(value);
+                    list.add(new Pair<>(key, value));
                 }
             }
         } catch (IOException e) {
             e.printStackTrace();
         }
-        return map;
+        Collections.shuffle(list);
+
+        return new ConcurrentLinkedQueue<>(list);
     }
 
 
-    private static Map<String, List<String>> readHotListingRecords(String filePath) {
-        Map<String, List<String>> records = new ConcurrentHashMap<>();
+    private static ConcurrentLinkedQueue<Pair<String, String>> readHotListingRecords(String filePath) {
+        ConcurrentLinkedQueue<Pair<String, String>> records = new ConcurrentLinkedQueue<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
             while ((line = reader.readLine()) != null) {
                 String[] parts = line.split(",");
                 if (parts.length == 3) {
-                    String firstColumn = parts[0].trim();
-                    String secondColumn = parts[1].trim();
+                    String lid = parts[0].trim();
+                    String pid = parts[1].trim();
                     String thirdColumn = parts[2].trim();
-                    records.put(firstColumn, List.of( secondColumn, thirdColumn));
+                    records.add(new Pair<>(lid, pid));
                 }
             }
         } catch (IOException e) {
@@ -243,15 +251,13 @@ public class Performance {
     }
 
     private void removeAlreadyListedRecords() {
-        for (String player : hotPlayersAndItems.keySet()) {
-            hotPlayersAndItems.get(player).removeIf(s -> {
-                for (String listing : hotListings.keySet()) {
-                    if (hotListings.get(listing).get(0).equals(s))
-                        return true;
-                }
-                return false;
-            });
-        }
+        hotPlayersAndItems.removeIf( s -> {
+            for (Pair<String, String> listing : hotListings) {
+                if (listing.getSecond().equals(s.getSecond()))
+                    return true;
+            }
+            return false;
+        });
     }
 
     void start() throws Exception {
@@ -294,7 +300,7 @@ public class Performance {
         String partitionId = res.getString("partitionId");
         // since default value gets printed with the help text, we are escaping \n there and replacing it with correct value here.
         String payloadDelimiter = res.getString("payloadDelimiter").equals("\\n") ? "\n" : res.getString("payloadDelimiter");
-        warmup = 5;
+        warmup = 10;
         final Long benchmarkTime = res.getLong("benchmarkTime") + warmup;
 //        Integer timeout = res.getInt("timeout") != null ? res.getInt("timeout") : interval.intValue() * 2;
 
@@ -319,8 +325,10 @@ public class Performance {
 
         if (benchmarkMode.equals("store")) {
             hotPlayersAndItems = readHotPlayerRecords(res.getString("hotPlayers"));
+            populateHotPlayers();
             populateHotItems();
             hotListings = readHotListingRecords(res.getString("hotListings"));
+            populateHotListings();
             removeAlreadyListedRecords();
         } else if (benchmarkMode.equals("tpcc")) {
             populateHotWarehouses();
@@ -328,8 +336,10 @@ public class Performance {
 
 
 
-        if (res.getInt("maxThreads") != null)
+        if (res.getInt("maxThreads") != null) {
             this.MAX_THREADS = res.getInt("maxThreads");
+            this.MAX_QUEUE_SIZE = 5 * this.MAX_THREADS;
+        }
 
 
 
@@ -356,14 +366,21 @@ public class Performance {
 
 
         Thread.sleep(3000);
-        client = new Client(address, port, res.getString("2PLMode"));
+
+        String transactionMode = res.getString("transactionMode");
+        if (Objects.equals(transactionMode, "interactive")) {
+            client = new InteractiveClient(address, port, res.getString("2PLMode"));
+        }
+        else {
+            client = new StoredProcedureClient(address, String.valueOf(port), "Listings,Items,Players".split(","), res.getString("2PLMode"));
+        }
         client.setServerConfig(serverConfig);
 
         long sendingStart = System.currentTimeMillis();
 
 //            TODO: Refactor this function
         long startToWaitTime = System.currentTimeMillis();
-        Stats stats = new Stats(5000, 1000, resultFilePath, metricsFilePath, recordSize, 0, 0.0, 0, 20000, benchmarkMode.equals("store") ? res.getString("hotPlayers") : String.valueOf(NUM_OF_HOT_WAREHOUSE), HOT_RECORD_SELECTION_CHANCE, MAX_THREADS, res.getString("2PLMode"), operationDelay);
+        Stats stats = new Stats(10000000, 1000, resultFilePath, metricsFilePath, recordSize, 0, 0.0, 0, 20000, benchmarkMode.equals("store") ? res.getString("hotPlayers") : String.valueOf(NUM_OF_HOT_WAREHOUSE), HOT_RECORD_SELECTION_CHANCE, MAX_THREADS, res.getString("2PLMode"), operationDelay);
 
         Integer numberOfItemsToRead = res.get("readItemNumber");
         Thread itemThread = null;
@@ -375,7 +392,37 @@ public class Performance {
             itemThread = runItemThread(sendingStart, benchmarkTime, numberOfItemsToRead, stats);
         }
 
-        for (long i = 0; i < numRecords; i++) {
+
+        ThreadPoolExecutor producerExecutor = (ThreadPoolExecutor) Executors.newFixedThreadPool(2);
+//        for (int i = 0; i < 2; i++) {
+//            producerExecutor.submit(()->{
+//                while (true) {
+//                    ServerRequest request = getNextRequest(benchmarkMode);
+//                    executeRequestFromThreadPool(request, stats);
+//                }
+//            });
+//        }
+        for (int i = 0; i < MAX_THREADS; i++) {
+            executor.submit(() -> {
+                while (stats.isRunning()) {
+                    try {
+                        ServerRequest request = getNextRequest(benchmarkMode);
+                        executeRequestFromThreadPool(request, stats);
+                    }
+                    catch (Exception e) {
+                        log.error("ERROR IN THREAD EXECUTING: {}", e.getMessage());
+                    }
+                }
+            });
+        }
+
+
+
+
+
+
+
+        while (true) {
 
 
             long sendStartMs = System.currentTimeMillis();
@@ -386,8 +433,14 @@ public class Performance {
 
             stats.report(sendStartMs);
 
-            ServerRequest request = getNextRequest(benchmarkMode);
-            executeRequestFromThreadPool(request, stats);
+//            try {
+//
+//                Thread.sleep(1);
+//                log.error("current threads: {}, current queue: {}", executor.getActiveCount(), executor.getQueue().size());
+//            } catch (InterruptedException e) {
+//                e.printStackTrace();
+//            }
+
 //            sendRequestAsync(stats, recordSize, request, c, warmup, maxRetry, timeout, partitionId);
 
 
@@ -403,22 +456,42 @@ public class Performance {
 
 
         // wait for retries to be done
+        stats.stopRunning();
         Thread.sleep(1000 * 3L);
         log.info("Benchmark is finished...");
 
-        // TODO: closing open things?
-        /* print final results */
-        stats.printTotal();
-        metricServer.close();
 
+        executor.shutdownNow();
+        producerExecutor.shutdownNow();
         if (itemExecutor != null)
             itemExecutor.shutdownNow();
         if (itemThread != null) {
             itemThread.interrupt();
         }
-        executor.shutdownNow();
 
 
+
+        // wait for retries to be done
+        Thread.sleep(1000 * 1L);
+        // TODO: closing open things?
+        /* print final results */
+        stats.printTotal();
+
+    }
+
+    private void populateHotListings() {
+        for (Pair<String, String> listing: hotListings
+             ) {
+            readOnlyHotListings.add(listing.getFirst());
+        }
+    }
+
+    private void populateHotPlayers() {
+        for (Pair<String, String> item:
+             hotPlayersAndItems) {
+            if (!hotPlayers.contains(item.getFirst()))
+                hotPlayers.add(item.getFirst());
+        }
     }
 
     private void populateHotWarehouses() {
@@ -463,12 +536,12 @@ public class Performance {
                 while (itemExecutor.getQueue().size() >= MAX_QUEUE_SIZE) {
                     if ((System.currentTimeMillis() - sendingStart) / 1000 >= benchmarkTime)
                         break;
-                    try {
-                        log.debug("sleep");
-                        Thread.sleep(1);
-                    } catch (InterruptedException e) {
-                        e.printStackTrace();
-                    }
+//                    try {
+//                        log.debug("sleep");
+//                        Thread.sleep(1);
+//                    } catch (InterruptedException e) {
+//                        e.printStackTrace();
+//                    }
                 }
             }
         });
@@ -477,13 +550,13 @@ public class Performance {
     }
 
     private void populateHotItems() {
-        for (String player : hotPlayersAndItems.keySet()) {
-            hotItems.addAll(hotPlayersAndItems.get(player));
+        for (Pair<String, String> player : hotPlayersAndItems) {
+            hotItems.add(player.getSecond());
         }
     }
 
 
-    private ServerRequest getNextRequest(String benchmarkMode) {
+     private ServerRequest getNextRequest(String benchmarkMode) {
         if (benchmarkMode.equals("store")) {
             return getStoreServerRequest();
         }
@@ -557,8 +630,8 @@ public class Performance {
         );
 
 
-        long sendStartMs = System.currentTimeMillis();
-        TPCCServerRequest request = new TPCCServerRequest(TPCCServerRequest.Type.NEW_ORDER, txId++, values, sendStartMs, userAbort);
+        long sendStartMicro = System.nanoTime() / 1000;
+        TPCCServerRequest request = new TPCCServerRequest(TPCCServerRequest.Type.NEW_ORDER, txId.getAndIncrement(), values, sendStartMicro, userAbort);
         request.setArrayValues(arrayValues);
         return request;
     }
@@ -593,92 +666,122 @@ public class Performance {
                 "customerId", String.valueOf(customerId)
         );
 
-        long sendStartMs = System.currentTimeMillis();
-        return new TPCCServerRequest(TPCCServerRequest.Type.PAYMENT, txId++, values, sendStartMs, false);
+        long sendStartMicro = System.nanoTime() / 1000;
+        return new TPCCServerRequest(TPCCServerRequest.Type.PAYMENT, txId.getAndIncrement(), values, sendStartMicro, false);
     }
 
+    /* Should be thread safe*/
     private StoreServerRequest getStoreServerRequest() {
         //        TODO: Change to correct tx selection
         int chance = random.nextInt(100); // Generates a random number between 0 (inclusive) and 100 (exclusive)
-        buy_or_sell++;
+        int currBuyOrSell = buy_or_sell.incrementAndGet();
         if (chance < HOT_RECORD_SELECTION_CHANCE) {
-            buy_or_sell_hot++;
-            List<String> playersAsList = new ArrayList<>(hotPlayersAndItems.keySet());
-            List<String> playersWhoCanSell = playersAsList.stream().filter(record -> !hotPlayersAndItems.get(record).isEmpty()).toList();
-
-            if (hotListings.isEmpty() && playersWhoCanSell.isEmpty())
+            buy_or_sell_hot.incrementAndGet();
+            if (hotListings.isEmpty() && hotPlayersAndItems.isEmpty())
                 return null;
 
-            if (hotListings.isEmpty())
-                buy_or_sell_hot = 1; // FORCE SELL
-            else if (playersWhoCanSell.isEmpty())
-                buy_or_sell_hot = 2; // FORCE BUY
+            StoreServerRequest request = null;
+            while (request == null) {
+                if (hotListings.isEmpty())
+                    buy_or_sell_hot.set(1); // FORCE SELL
+                else if (hotPlayersAndItems.isEmpty())
+                    buy_or_sell_hot.set(2); // FORCE BUY
 
-            if (buy_or_sell_hot % 2 == 0) {
-                //buy
-                Map<String, String> tx = new HashMap<>();
-                String randomPlayer = playersAsList.get(random.nextInt(playersAsList.size()));
+                if (buy_or_sell_hot.get() % 2 == 0) { // buy
 
-                List<String> listingsAsList = new ArrayList<>(hotListings.keySet());
-                String randomListing = listingsAsList.get(random.nextInt(listingsAsList.size()));
-                // Get the list associated with this random key
-//                List<String> randomValues = hotPlayersAndItems.get(randomKey);
-                tx.put("PId", randomPlayer);
-                tx.put("LId", randomListing);
-                tx.put("IId", hotListings.get(randomListing).get(0));
-                tx.put("price", hotListings.get(randomListing).get(1));
-                hotListings.remove(randomListing);
-                long sendStartMs = System.currentTimeMillis();
-                return new StoreServerRequest(StoreServerRequest.Type.BUY_HOT, txId++, tx, sendStartMs);
-            } else {
-                //sell
-                Map<String, String> tx = new HashMap<>();
-                String randomPlayer = playersWhoCanSell.get(random.nextInt(playersWhoCanSell.size()));
+                    Pair<String, String> randomListing;
+                    try {
+                         randomListing = hotListings.remove();
+                         readOnlyHotListings.remove(randomListing.getFirst());
+                    } catch (NoSuchElementException e) {
+                        buy_or_sell_hot.incrementAndGet();
+                        continue;
+                    }
+                    String randomPlayer = hotPlayers.get(random.nextInt(hotPlayers.size()));
 
-                List<String> randomValues = new ArrayList<>(hotPlayersAndItems.get(randomPlayer));
-                String randomItem = randomValues.get(random.nextInt(randomValues.size()));
 
-                tx.put("PId", randomPlayer);
-                tx.put("IId", randomItem);
-                hotPlayersAndItems.get(randomPlayer).remove(randomItem);
-                long sendStartMs = System.currentTimeMillis();
-                return new StoreServerRequest(StoreServerRequest.Type.SELL_HOT, txId++, tx, sendStartMs);
+                    Map<String, String> tx = new HashMap<>();
+                    tx.put("PId", randomPlayer);
+                    tx.put("LId", randomListing.getFirst());
+                    long sendStartMicro = System.nanoTime() / 1000;
+                    request = new StoreServerRequest(StoreServerRequest.Type.BUY_HOT, txId.getAndIncrement(), tx, sendStartMicro);
+                }
+                else {
+                    //sell
+                    Pair<String, String> hotPlayersAndItem;
+                    try {
+                        hotPlayersAndItem = hotPlayersAndItems.remove();
+                    } catch (NoSuchElementException e) {
+                        buy_or_sell_hot.incrementAndGet();
+                        continue;
+                    }
+
+                    Map<String, String> tx = new HashMap<>();
+                    tx.put("PId", hotPlayersAndItem.getFirst());
+                    tx.put("IId", hotPlayersAndItem.getSecond());
+                    long sendStartMicro = System.nanoTime() / 1000;
+                    request = new StoreServerRequest(StoreServerRequest.Type.SELL_HOT, txId.getAndIncrement(), tx, sendStartMicro);
+                }
             }
+            return request;
+
         } else {
             Map<String, String> tx = new HashMap<>();
-            if (buy_or_sell % 2 == 0) {
-                String lid = Integer.toString(random.nextInt(1, NUM_OF_LILSTINGS));
-                while (alreadyBoughtListing.contains(lid))
-                    lid = Integer.toString(random.nextInt(1, NUM_OF_LILSTINGS));
+            if (currBuyOrSell % 2 == 0) {
+                String lid, pid;
+                if (nextNotHotListingID.get() >= NUM_OF_LISTINGS) {
+                    Pair<String, String> listing = notHotListings.remove();
+                    lid = listing.getFirst();
+                    pid = listing.getSecond();
+                }
+                else {
+                    lid = String.valueOf(nextNotHotListingID.incrementAndGet());
+                    while (alreadyBoughtListing.contains(lid) || readOnlyHotListings.contains(lid))
+                        lid = String.valueOf(nextNotHotListingID.incrementAndGet());
+                    pid = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
+                }
 
                 alreadyBoughtListing.add(lid);
-                tx.put("PId", Integer.toString(random.nextInt(1, NUM_OF_PLAYERS)));
+                tx.put("PId", pid);
                 tx.put("LId", lid);
-                long sendStartMs = System.currentTimeMillis();
-                return new StoreServerRequest(StoreServerRequest.Type.BUY, txId++, tx, sendStartMs);
+                long sendStartMicro = System.nanoTime() / 1000;
+                return new StoreServerRequest(StoreServerRequest.Type.BUY, txId.getAndIncrement(), tx, sendStartMicro);
             } else {
-                String randomPlayer = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
-                String randomItem = Integer.toString(Integer.parseInt(randomPlayer) * 5 + random.nextInt(0, 5));
-                tx.put("PId", randomPlayer);
-                tx.put("IId", randomItem);
-                long sendStartMs = System.currentTimeMillis();
-                return new StoreServerRequest(StoreServerRequest.Type.SELL, txId++, tx, sendStartMs);
+//                nextNotHotPlayer.updateAndGet(player -> {
+//                    if (player >= NUM_OF_PLAYERS) {
+//                        nextNotHotItemIndex.updateAndGet(x -> (x + 1) % 5);
+//                        return NUM_OF_PLAYERS / 5;
+//                    }
+//                    return player;
+//                });
+
+                int randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
+                while (hotPlayers.contains(String.valueOf(randomPlayer)))
+                    randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
+
+
+                int randomItem = randomPlayer * 5 + random.nextInt(5);
+
+                tx.put("PId", String.valueOf(randomPlayer));
+                tx.put("IId", String.valueOf(randomItem));
+                long sendStartMicro = System.nanoTime() / 1000;
+                return new StoreServerRequest(StoreServerRequest.Type.SELL, txId.getAndIncrement(), tx, sendStartMicro);
             }
         }
     }
 
     private void executeRequestFromThreadPool(ServerRequest request, Stats stats) {
-        stats.nextAdded(1);
+//        stats.nextAdded(1);
         log.info("submitting the request {}", request.getValues());
         submitRequest(request, stats);
-        while (executor.getQueue().size() >= MAX_QUEUE_SIZE) {
-            try {
-                log.debug("sleep");
-                Thread.sleep(1);
-            } catch (InterruptedException e) {
-                e.printStackTrace();
-            }
-        }
+//        while (executor.getQueue().size() >= MAX_QUEUE_SIZE) {
+//            try {
+//                log.debug("sleep");
+////                Thread.sleep(1);
+//            } catch (InterruptedException e) {
+//                e.printStackTrace();
+//            }
+//        }
     }
 
     private void submitRequest(ServerRequest request, Stats stats) {
@@ -690,7 +793,7 @@ public class Performance {
 
     private void submitRequest(TPCCServerRequest request, Stats stats) {
         Future<Void> future = executor.submit(()->{
-            Client.TransactionResult result = new Client.TransactionResult();
+            InteractiveClient.TransactionResult result = new InteractiveClient.TransactionResult();
             if (request.getType() == TPCCServerRequest.Type.PAYMENT) {
                 Map<String, String> tx = request.getValues();
                 result = client.TPCC_payment(tx.get("warehouseId"),
@@ -701,6 +804,7 @@ public class Performance {
                         tx.get("customerId"));
                 if (!result.isSuccess()) {
                     log.error("Unsuccessful TPCC Payment {}", tx);
+                    stats.addWaistedTime(result.getStart());
                     submitRetry(request, stats);
                 }
             }
@@ -728,7 +832,17 @@ public class Performance {
 
             if (result.isSuccess()) {
                 stats.nextCompletion(request.start, 1);
-                stats.addUsefulWork(result.getStart(), result.getWaitingTime());
+                long now = System.nanoTime();
+                stats.addAblationTimes(now, result.getStart(),
+                        Long.parseLong(result.getMetrics().get("waiting_time")),
+                        Long.parseLong(result.getMetrics().get("io_time")),
+                        Long.parseLong(result.getMetrics().get("locking_time")),
+                        Long.parseLong(result.getMetrics().get("retiring_time")),
+                        Long.parseLong(result.getMetrics().get("initiation_time")),
+                        Long.parseLong(result.getMetrics().get("unlocking_time")),
+                        Long.parseLong(result.getMetrics().get("committing_time")),
+                        Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
+                        Long.parseLong(result.getMetrics().get("rolling_back_time")));
                 log.info("request successful {}:{}", request.getType(),request.getValues());
             }
             return null;
@@ -737,60 +851,77 @@ public class Performance {
     }
 
     private void submitRequest(StoreServerRequest request, Stats stats) {
-        Future<Void> future = executor.submit(() -> {
-            boolean success = true;
-
-            if (request.getType() == StoreServerRequest.Type.BUY) {
-                String newItem = client.buyListing(request.getValues().get("PId"), request.getValues().get("LId"));
-                if (newItem == null) {
-                    success = false;
-                    log.error("Unsuccessful buy {}", request.getValues());
-                    // we do not retry records that are not hot!
+        InteractiveClient.TransactionResult result = new InteractiveClient.TransactionResult();
+        if (request.getType() == StoreServerRequest.Type.BUY) {
+            result = client.buyListing(request.getValues().get("PId"), request.getValues().get("LId"));
+            if (!result.isSuccess()) {
+                log.error("Unsuccessful buy {}", request.getValues());
+                stats.addWaistedTime(result.getStart());
+                // we do not retry records that are not hot!
 //                    submitRetry(request, stats);
-                }
-            }
-            else if (request.getType() == StoreServerRequest.Type.SELL) {
-                String newListing = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1);
-                if (newListing == null) {
-                    success = false;
-                    log.error("Unsuccessful sell {}", request.getValues());
-                    // we do not retry records that are not hot!
-//                    submitRetry(request, stats);
-                }
             }
 
-            else if (request.getType() == StoreServerRequest.Type.BUY_HOT) {
-                String newItem = client.buyListing(request.getValues().get("PId"), request.getValues().get("LId"));
-                if (newItem != null) {
-                    hotPlayersAndItems.get(request.getValues().get("PId")).add(newItem);
-                }
-                else {
-                    if (!isGoingToRetry(request))
-                        hotListings.put(request.getValues().get("LId"), List.of(request.getValues().get("IId"), request.getValues().get("price")));
-                    log.error("Unsuccessful buy {}", request.getValues());
-                    success = false;
-                    submitRetry(request, stats);
-                }
+        }
+        else if (request.getType() == StoreServerRequest.Type.SELL) {
+            result = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1);
+            if (!result.isSuccess()) {
+                log.error("Unsuccessful sell {}", request.getValues());
+                stats.addWaistedTime(result.getStart());
+                // we do not retry records that are not hot!
+//                    submitRetry(request, stats);
             }
-            else if (request.getType() == StoreServerRequest.Type.SELL_HOT) {
-                String newListing = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1);
-                if (newListing != null) {
-                    hotListings.put(newListing, List.of(request.getValues().get("IId"), "1"));
-                }
-                else {
-                    if (!isGoingToRetry(request))
-                        hotPlayersAndItems.get(request.getValues().get("PId")).add(request.getValues().get("IId"));
-                    log.error("Unsuccessful sell {}", request.getValues());
-                    success = false;
-                    submitRetry(request, stats);
-                }
+            else {
+                notHotListings.add(new Pair<>(result.getMessage(), request.getValues().get("PId")));
             }
-            if (success) {
-                stats.nextCompletion(request.start, 1);
-                log.info("request successful {}", request.getValues());
+        }
+        else if (request.getType() == StoreServerRequest.Type.BUY_HOT) {
+            result = client.buyListing(request.getValues().get("PId"), request.getValues().get("LId"));
+            if (result.isSuccess()) {
+                hotPlayersAndItems.add(new Pair<>(request.getValues().get("PId"), result.getMessage()));
             }
-            return null;
-        });
+            else {
+                stats.addWaistedTime(result.getStart());
+                if (!isGoingToRetry(request)) {
+                    readOnlyHotListings.add(request.getValues().get("LId"));
+                    hotListings.add(new Pair<>(request.getValues().get("LId"), request.getValues().get("IId")));
+                }
+                log.error("Unsuccessful buy {}", request.getValues());
+                submitRetry(request, stats);
+            }
+        }
+        else if (request.getType() == StoreServerRequest.Type.SELL_HOT) {
+            result = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1);
+            if (result.isSuccess()) {
+                readOnlyHotListings.add(result.getMessage());
+                hotListings.add(new Pair<>(result.getMessage(), request.getValues().get("IId")));
+            } else {
+                stats.addWaistedTime(result.getStart());
+                if (!isGoingToRetry(request))
+                    hotPlayersAndItems.add(new Pair<>(request.getValues().get("PId"), request.getValues().get("IId")));
+                log.error("Unsuccessful sell {}", request.getValues());
+                submitRetry(request, stats);
+            }
+        }
+
+
+        if (result.isSuccess()) {
+
+            stats.nextCompletion(request.start, 1);
+//                log.error("log completion time : {}", System.nanoTime() -  time);
+//                log.error("{}", result.isSuccess());
+            long now = System.nanoTime();
+            stats.addAblationTimes(now, result.getStart(),
+                    Long.parseLong(result.getMetrics().get("waiting_time")),
+                    Long.parseLong(result.getMetrics().get("io_time")),
+                    Long.parseLong(result.getMetrics().get("locking_time")),
+                    Long.parseLong(result.getMetrics().get("retiring_time")),
+                    Long.parseLong(result.getMetrics().get("initiation_time")),
+                    Long.parseLong(result.getMetrics().get("unlocking_time")),
+                    Long.parseLong(result.getMetrics().get("committing_time")),
+                    Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
+                    Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            log.info("request successful {}", request.getValues());
+        }
     }
 
     private boolean isGoingToRetry(ServerRequest request) {
@@ -919,7 +1050,7 @@ public class Performance {
                 .type(String.class)
                 .metavar("ADDRESS")
                 .dest("address")
-                .help("leader's address");
+                .help("Server address for interactive client / Postgres address for stored procedure / Rocksdb directory");
 
         parser.addArgument("--port")
                 .action(store())
@@ -927,7 +1058,7 @@ public class Performance {
                 .type(Integer.class)
                 .metavar("PORT")
                 .dest("port")
-                .help("leader's port");
+                .help("Server port for interactive client / Postgres port for stored procedure / -1 For rocksdb");
 
         numberOptions.addArgument("--num-records")
                 .action(store())
@@ -1197,25 +1328,36 @@ public class Performance {
                 .metavar("HOTWAREHOUSE")
                 .help("number of hot warehouse records in tpcc benchmark.");
 
+        parser.addArgument("--transaction-mode")
+                .action(store())
+                .required(false)
+                .setDefault("interactive")
+                .type(String.class)
+                .dest("transactionMode")
+                .metavar("TRANSACTIONMODE")
+                .help("Transaction execution mode. could be either \"interactive\" or \"storedProcedure\"");
+
+
+
         return parser;
     }
 
     private static class Stats {
-        private boolean warmup;
+        private AtomicBoolean warmup;
         private long start;
         private long windowStart;
-        private int[] latencies;
+        private ConcurrentLinkedQueue<Integer> latencies = new ConcurrentLinkedQueue<>();
         private int sampling;
-        private int iteration;
-        private int index;
-        private long count;
-        private long bytes;
-        private int maxLatency;
-        private long totalLatency;
-        private long windowCount;
-        private int windowMaxLatency;
-        private long windowTotalLatency;
-        private long windowBytes;
+        private AtomicInteger iteration;
+        private AtomicInteger index;
+        private AtomicLong count;
+        private AtomicLong bytes;
+        private AtomicLong maxLatency;
+        private AtomicLong totalLatency;
+        private AtomicLong windowCount;
+        private AtomicLong windowMaxLatency;
+        private AtomicLong windowTotalLatency;
+        private AtomicLong windowBytes;
         private long reportingInterval;
 
         private long numRecords;
@@ -1231,9 +1373,8 @@ public class Performance {
         private int previousWindowCompletedRetries;
 
         private String metricsFilePath;
-        private int started;
-        private int startedBytes;
-        private int startedWindowBytes;
+        private AtomicInteger startedBytes;
+        private AtomicInteger startedWindowBytes;
         private String hotRecords;
         private int hotChance;
 
@@ -1242,55 +1383,21 @@ public class Performance {
         private String mode;
         private int operationDelay;
 
-        private long usefulWorkTime;
-        private long waitedTime;
-        private long wastedTimeWork;
+        private AtomicLong usefulWorkTime;
+        private AtomicLong waitedTime;
+        private AtomicLong ioTime;
+        private AtomicLong lockingTime;
+        private AtomicLong wastedTimeWork;
+        private AtomicLong retiringTime;
+        private AtomicLong initiationTime;
+        private AtomicLong unlockingTime;
+        private AtomicLong committingTime;
+        private AtomicLong waitingForOthersTime;
+        private AtomicLong rollingBackTime;
 
-        // Metrics
-        private static final Summary finishedRequestsBytes = Summary.build()
-                .name("paxos_requests_finished_bytes")
-                .help("size of requests that finished")
-                .register();
-        private static final Summary addedRequestsBytes = Summary.build()
-                .name("paxos_requests_sent_bytes")
-                .help("size of requests sent to the leader")
-                .register();
-        private static final Gauge batchSizeGauge = Gauge.build()
-                .name("paxos_batch_size")
-                .help("Batch size")
-                .register();
-        private static final Gauge intervalGauge = Gauge.build()
-                .name("paxos_interval_total")
-                .help("Interval between requests")
-                .register();
-        private static final Gauge timeoutGauge = Gauge.build()
-                .name("paxos_timeout_total")
-                .help("timeout of a request")
-                .register();
-        private static final Summary finishedRequestsLatency = Summary.build()
-                .name("paxos_requests_finished_latency")
-                .help("Latency of requests responded")
-                .quantile(0.5, 0.001)    // 0.5 quantile (median) with 0.01 allowed error
-                .quantile(0.95, 0.005)  // 0.95 quantile with 0.005 allowed error
-                .register();
-        private static final Counter requestRetried = Counter.build()
-                .name("paxos_requests_retired_total")
-                .help("Number of requests that retried")
-                .register();
-        private static final Counter allRetries = Counter.build()
-                .name("paxos_request_retries_total")
-                .help("Number of request retries")
-                .register();
-        private static final Counter retriesCompleted = Counter.build()
-                .name("paxos_request_retry_completed_total")
-                .help("Number of retries that has been compelted")
-                .register();
-
-        private static final Gauge memoryGauge = Gauge.build()
-                .name("memory_usage")
-                .help("Memory usage of database")
-                .register();
         private int itemCount;
+
+        private AtomicBoolean running;
 
         public Stats(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay) {
             init(numRecords, reportingInterval, resultFilePath, metricsFilePath, recordSize, batchSize, interval, timeout, memory, hotRecords, hotChance, threads, mode, operationDelay);
@@ -1299,20 +1406,18 @@ public class Performance {
         private void init(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay) {
             this.start = System.currentTimeMillis();
             this.windowStart = System.currentTimeMillis();
-            this.iteration = 0;
-            this.sampling = (int) (numRecords / Math.min(numRecords, 500000));
-            this.latencies = new int[(int) (numRecords / this.sampling) + 1];
-            this.index = 0;
-            this.started = 0;
-            this.startedBytes = 0;
-            this.startedWindowBytes = 0;
-            this.maxLatency = 0;
-            this.totalLatency = 0;
-            this.windowCount = 0;
-            this.windowMaxLatency = 0;
-            this.windowTotalLatency = 0;
-            this.windowBytes = 0;
-            this.totalLatency = 0;
+            this.iteration = new AtomicInteger(0);
+            this.sampling = (int) (numRecords / Math.min(numRecords, 50000));
+            this.latencies = new ConcurrentLinkedQueue<>();
+            this.index = new AtomicInteger(0);
+            this.startedBytes = new AtomicInteger(0);
+            this.startedWindowBytes = new AtomicInteger(0);
+            this.maxLatency = new AtomicLong(0);
+            this.windowCount = new AtomicLong(0);
+            this.windowMaxLatency = new AtomicLong(0);
+            this.windowTotalLatency = new AtomicLong(0);
+            this.windowBytes = new AtomicLong(0);
+            this.totalLatency = new AtomicLong(0);
             this.previousWindowRequestRetried = 0;
             this.previousWindowRetries = 0;
             this.completedRetries = 0;
@@ -1323,12 +1428,8 @@ public class Performance {
             this.numRecords = numRecords;
             this.recordSize = recordSize;
             this.batchSize = batchSize;
-            batchSizeGauge.set(batchSize);
             this.interval = interval;
-            intervalGauge.set(interval);
             this.timeout = timeout;
-            timeoutGauge.set(timeout);
-            memoryGauge.set(memory);
             this.retries = new ConcurrentHashMap<>();
             this.hotRecords = hotRecords;
             this.hotChance = hotChance;
@@ -1336,9 +1437,21 @@ public class Performance {
             createResultCSVFiles(resultFilePath);
             this.operationDelay = operationDelay;
             this.mode = mode;
-            this.usefulWorkTime = 0;
-            this.waitedTime = 0;
-            this.wastedTimeWork = 0;
+            this.usefulWorkTime = new AtomicLong(0);
+            this.waitedTime = new AtomicLong(0);
+            this.ioTime = new AtomicLong(0);
+            this.wastedTimeWork = new AtomicLong(0);
+            this.lockingTime = new AtomicLong(0);
+            this.retiringTime = new AtomicLong(0);
+            this.initiationTime = new AtomicLong(0);
+            this.unlockingTime = new AtomicLong(0);
+            this.committingTime = new AtomicLong(0);
+            this.waitingForOthersTime = new AtomicLong(0);
+            this.rollingBackTime = new AtomicLong(0);
+            this.running = new AtomicBoolean(true);
+            this.warmup = new AtomicBoolean(true);
+            this.count = new AtomicLong(0);
+            this.bytes = new AtomicLong(0);
         }
 
         private void createResultCSVFiles(String resultFilePath) {
@@ -1349,7 +1462,7 @@ public class Performance {
 
                 // Check if the file already exists to avoid overwriting it
                 if (!Files.exists(path)) {
-                    String CSVHeader = "num of records, mode, operation_delay, hot_records, prob, threads, throughput(tx/s), item_read(tx/s), request_retried, total_retries, avg_retry_per_request, avg_latency, max_latency, 50th_latency, 95th_latency, 99th_latency, 99.9th_latency, useful_time, waited_time, wasted_time\n";
+                    String CSVHeader = "num of records, mode, operation_delay, hot_records, prob, threads, throughput(tx/s), item_read(tx/s), request_retried, total_retries, avg_retry_per_request, avg_latency, max_latency, 50th_latency, 95th_latency, 99th_latency, 99.9th_latency, useful_time, waited_time, wasted_time, io_time, locking_time, retiring_time, initiation_time, unlocking_time, committing_time, waiting_for_others_time, rolling_back_time\n";
                     BufferedWriter out = new BufferedWriter(new FileWriter(resultFilePath));
 
                     // Writing the header to output stream
@@ -1364,26 +1477,25 @@ public class Performance {
             }
         }
 
-        public synchronized void record(int iter, int latency, int bytes, long time) {
-            this.count++;
-            this.bytes += bytes;
-            finishedRequestsBytes.observe(bytes);
-            finishedRequestsLatency.observe((double) latency/1000);
-            this.totalLatency += latency;
-            this.maxLatency = Math.max(this.maxLatency, latency);
-            this.windowCount++;
-            this.windowBytes += bytes;
-            this.windowTotalLatency += latency;
-            this.windowMaxLatency = Math.max(windowMaxLatency, latency);
+        public void record(int iter, int latency, int bytes) {
+            this.count.incrementAndGet();
+            this.bytes.addAndGet(bytes);
+            this.totalLatency.addAndGet(latency);
+            this.maxLatency.updateAndGet(currentMax -> Math.max(currentMax, latency));
+            this.windowCount.incrementAndGet();
+            this.windowBytes.addAndGet(bytes);
+            this.windowTotalLatency.addAndGet(latency);
+            this.windowMaxLatency.updateAndGet(currentMax -> Math.max(currentMax, latency));
+
             if (iter % this.sampling == 0) {
-                this.latencies[index] = latency;
-                this.index++;
+                latencies.add(latency);
+                index.incrementAndGet();
             }
-            report(time);
         }
 
+
         private void report(long time) {
-            if (warmup)
+            if (warmup.get())
                 return;
             if (time - windowStart >= reportingInterval) {
                 printWindow();
@@ -1392,87 +1504,71 @@ public class Performance {
         }
 
         public void nextCompletion(long start, int bytes) {
-            if (warmup)
+            if (warmup.get())
                 return;
-            long now = System.currentTimeMillis();
+            long now = System.nanoTime() / 1000;
             int latency = (int) (now - start);
-            record(iteration, latency, bytes, now);
-            this.iteration++;
+            record(iteration.getAndIncrement(), latency, bytes);
         }
 
-        public void nextBatchCompletion(long quantity, long start, long end, int bytes) {
-            this.count += quantity - 1;
-            this.windowCount += quantity - 1;
-            nextCompletion(start, end, bytes);
-        }
-
-        public synchronized void nextAdded(int bytes) {
-            if (warmup)
+        public void nextAdded(int bytes) {
+            if (warmup.get())
                 return;
             long now = System.currentTimeMillis();
-            this.started++;
-            addedRequestsBytes.observe(bytes);
-            this.startedBytes += bytes;
-            this.startedWindowBytes += bytes;
+//            addedRequestsBytes.observe(bytes);
+//            this.startedBytes.addAndGet(bytes);
+//            this.startedWindowBytes.addAndGet(bytes);
 
-            report(now);
+//            report(now);
         }
 
-        public void nextCompletion(long start, long end, int bytes) {
-            if (warmup)
-                return;
-            int latency = (int) (end - start);
-            record(iteration, latency, bytes, end);
-            this.iteration++;
-        }
 
         public void printWindow() {
             long elapsed = System.currentTimeMillis() - windowStart;
-            double recsPerSec = 1000.0 * windowCount / (double) elapsed;
-            double mbPerSec = 1000.0 * this.windowBytes / (double) elapsed / (1024.0);
-            double throughputMbPerSec = 1000.0 * this.startedWindowBytes / (double) elapsed / (1024.0);
-            System.out.printf("%d records sent, %.1f records/sec (%.3f KB/sec) of (%.3f KB/sec), %.1f ms avg latency, %.1f ms max latency.%n%n",
-                    windowCount,
+            double recsPerSec = 1000.0 * windowCount.get() / (double) elapsed;
+            double mbPerSec = 1000.0 * this.windowBytes.get() / (double) elapsed / (1024.0);
+            System.out.printf("%d records sent, %.1f records/sec (%.3f KB/sec), %.1f μs avg latency, %.1f μs max latency.%n%n",
+                    windowCount.get(),
                     recsPerSec,
                     mbPerSec,
-                    throughputMbPerSec,
-                    windowTotalLatency / (double) windowCount,
-                    (double) windowMaxLatency);
+                    windowTotalLatency.get() / (double) windowCount.get(),
+                    (double) windowMaxLatency.get());
 
         }
 
         public void newWindow() {
             this.windowStart = System.currentTimeMillis();
-            this.windowCount = 0;
-            this.windowMaxLatency = 0;
-            this.windowTotalLatency = 0;
-            this.windowBytes = 0;
-            this.startedWindowBytes = 0;
-            previousWindowRetries = retries.size();
-            previousWindowRequestRetried = retries.values().stream().mapToInt(Integer::intValue).sum();
-            previousWindowCompletedRetries = completedRetries;
+            this.windowCount.set(0);
+            this.windowMaxLatency.set(0);
+            this.windowTotalLatency.set(0);
+            this.windowBytes.set(0);
+            this.startedWindowBytes.set(0);
+//            this.previousWindowRetries = retries.size();
+//            this.previousWindowRequestRetried = retries.values().stream().mapToInt(Integer::intValue).sum();
+//            this.previousWindowCompletedRetries = completedRetries;
         }
 
         public void printTotal() {
-            if (warmup)
+            if (warmup.get())
                 return;
             long elapsed = System.currentTimeMillis() - start;
-            double recsPerSec = 1000.0 * count / (double) elapsed;
+
+
+            double recsPerSec = 1000.0 * count.get() / (double) elapsed;
             double itemsPerSec = 1000.0 * itemCount / (double) elapsed;
-            double mbPerSec = 1000.0 * this.bytes / (double) elapsed / (1024.0);
-            double throughputMbPerSec = 1000.0 * this.startedBytes / (double) elapsed / (1024.0);
-            int[] percs = percentiles(this.latencies, index, 0.5, 0.95, 0.99, 0.999);
+            double mbPerSec = 1000.0 * this.bytes.get() / (double) elapsed / (1024.0);
+//            double throughputMbPerSec = 1000.0 * this.startedBytes / (double) elapsed / (1024.0);
+            int[] percs = percentiles(this.latencies, index.get(), 0.5, 0.95, 0.99, 0.999);
             int numOfRetries = retries.size();
             int totalRetries = retries.values().stream().mapToInt(Integer::intValue).sum();
             Double avgRetryPerReq = retries.isEmpty() ? 0.0 : retries.values().stream().mapToInt(Integer::intValue).average().getAsDouble();
-            System.out.printf("%d records sent, %f records/sec (%.3f KB/sec) of (%.3f KB/sec), %.3f items/sec, %.2f ms avg latency, %.2f ms max latency, %d ms 50th, %d ms 95th, %d ms 99th, %d ms 99.9th.%n --  requests retried: %d, retries: %d, avg retry per request: %.2f, useful work time: %d, waited time: %d, wasted time: %d\n",
-                    count,
+            System.out.printf("%d records sent, %f records/sec (%.3f KB/sec), %.3f items/sec, %.2f μs avg latency, %.2f μs max latency, %d μs 50th, %d μs 95th, %d μs 99th, %d μs 99.9th.%n --  requests retried: %d, retries: %d, avg retry per request: %.2f, useful work time: %d, waited time: %d, wasted time: %d, IO time: %d, Locking time: %d, retiringTime: %d, initiationTime: %d, unlockingTime: %d, committingTime: %d, waitingForOthersTime: %d, rollingBackTime: %d\n",
+                    count.get(),
                     recsPerSec,
                     mbPerSec,
-                    throughputMbPerSec,
                     itemsPerSec,
-                    totalLatency / (double) count,
-                    (double) maxLatency,
+                    totalLatency.get() / (double) count.get(),
+                    (double) maxLatency.get(),
                     percs[0],
                     percs[1],
                     percs[2],
@@ -1480,15 +1576,23 @@ public class Performance {
                     numOfRetries,
                     totalRetries,
                     avgRetryPerReq,
-                    usefulWorkTime,
-                    waitedTime,
-                    wastedTimeWork
+                    usefulWorkTime.get(),
+                    waitedTime.get(),
+                    wastedTimeWork.get(),
+                    ioTime.get(),
+                    lockingTime.get(),
+                    retiringTime.get(),
+                    initiationTime.get(),
+                    unlockingTime.get(),
+                    committingTime.get(),
+                    waitingForOthersTime.get(),
+                    rollingBackTime.get()
                     );
 
             System.out.println("");
 
-            String resultCSV = String.format("%d,%s,%d,%s,%d,%d,%.2f,%.2f,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d\n",
-                    count,
+            String resultCSV = String.format("%d,%s,%d,%s,%d,%d,%.2f,%.2f,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+                    count.get(),
                     mode,
                     operationDelay,
                     hotRecords,
@@ -1499,15 +1603,23 @@ public class Performance {
                     numOfRetries,
                     totalRetries,
                     avgRetryPerReq,
-                    totalLatency / (double) count,
-                    (double) maxLatency,
+                    totalLatency.get() / (double) count.get(),
+                    (double) maxLatency.get(),
                     percs[0],
                     percs[1],
                     percs[2],
                     percs[3],
-                    usefulWorkTime,
-                    waitedTime,
-                    wastedTimeWork);
+                    usefulWorkTime.get(),
+                    waitedTime.get(),
+                    wastedTimeWork.get(),
+                    ioTime.get(),
+                    lockingTime.get(),
+                    retiringTime.get(),
+                    initiationTime.get(),
+                    unlockingTime.get(),
+                    committingTime.get(),
+                    waitingForOthersTime.get(),
+                    rollingBackTime.get());
             try {
                 BufferedWriter out = new BufferedWriter(
                         new FileWriter(resultFilePath, true));
@@ -1523,26 +1635,29 @@ public class Performance {
             log.info(resultCSV);
         }
 
-        private static int[] percentiles(int[] latencies, int count, double... percentiles) {
-            int size = Math.min(count, latencies.length);
-            Arrays.sort(latencies, 0, size);
+        private static int[] percentiles(ConcurrentLinkedQueue<Integer> latencies, int count, double... percentiles) {
+            int size = Math.min(count, latencies.size());
+            List<Integer> latencyArrays = new ArrayList<>(List.of(latencies.toArray(new Integer[0])));
+            latencyArrays.sort(Comparator.nullsLast(Comparator.naturalOrder()));
+
             int[] values = new int[percentiles.length];
             for (int i = 0; i < percentiles.length; i++) {
                 int index = (int) (percentiles[i] * size);
-                values[i] = latencies[index];
+                if (latencyArrays.get(index) != null)
+                    values[i] = latencyArrays.get(index);
+                else
+                    values[i] = -1;
             }
             return values;
         }
 
         public void addRetry(long c) {
-            if (warmup)
+            if (warmup.get())
                 return;
-            allRetries.inc();
             if (retries.containsKey(c))
                 retries.put(c, retries.get(c) + 1);
             else {
                 retries.put(c, 1);
-                requestRetried.inc();
             }
         }
 
@@ -1552,19 +1667,16 @@ public class Performance {
 
         public void updateBatchSize(Integer batchSize) {
             this.batchSize = batchSize;
-            batchSizeGauge.set(batchSize);
         }
 
 
         public void updateInterval(Double interval) {
             this.interval = interval;
-            intervalGauge.set(interval);
         }
 
         public void completeRetry(long batchId) {
             if (retries.containsKey(batchId)) {
                 retries.remove(batchId);
-                retriesCompleted.inc();
                 completedRetries++;
             }
         }
@@ -1573,32 +1685,44 @@ public class Performance {
             return !retries.isEmpty();
         }
 
-        public void changeMemory(long memoryTrigger) {
-            memoryGauge.set(memoryTrigger);
-        }
 
         public void exitWarmup() {
-            if (warmup) {
+            if (warmup.get()) {
                 this.start = System.currentTimeMillis();
-                warmup = false;
+                warmup.set(false);
             }
         }
 
         public void itemReadFinished() {
-            if (warmup)
+            if (warmup.get())
                 return;
             this.itemCount++;
         }
 
-        public void addUsefulWork(long start, long waitingTime) {
-            long now = System.currentTimeMillis();
-            this.usefulWorkTime += ((now - start) - waitingTime);
-            this.waitedTime += waitingTime;
+        public void addAblationTimes(long now, long start, long waitingTime, long ioTime, long lockingTime, long retiringTime, long initiationTime, long unlockingTime, long committingTime, long waitingForOthersTime, long rollingBackTime) {
+            this.usefulWorkTime.addAndGet(((now - start) - waitingTime) / 1000);
+            this.waitedTime.addAndGet( waitingTime / 1000);
+            this.ioTime.addAndGet( ioTime / 1000);
+            this.lockingTime.addAndGet( lockingTime / 1000);
+            this.retiringTime.addAndGet( retiringTime / 1000);
+            this.initiationTime.addAndGet( initiationTime / 1000);
+            this.unlockingTime.addAndGet( unlockingTime / 1000);
+            this.committingTime.addAndGet( committingTime / 1000);
+            this.waitingForOthersTime.addAndGet( waitingForOthersTime / 1000);
+            this.rollingBackTime.addAndGet(rollingBackTime / 1000);
         }
 
         public void addWaistedTime(long start) {
-            long now = System.currentTimeMillis();
-            this.wastedTimeWork += (now - start);
+            long now = System.nanoTime();
+            this.wastedTimeWork.addAndGet((now - start) / 1000);
+        }
+
+        public boolean isRunning() {
+            return this.running.get();
+        }
+
+        public void stopRunning() {
+            this.running.set(false);
         }
     }
 
