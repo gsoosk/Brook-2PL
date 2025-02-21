@@ -80,12 +80,12 @@ public class InteractiveClient extends Client {
     }
 
     private void test() {
-        String tx1 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx2 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx3 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx4 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx5 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx6 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
+        String tx1 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx2 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx3 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx4 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx5 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx6 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
 
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(5);
         executor.submit(()->  {
@@ -192,7 +192,7 @@ public class InteractiveClient extends Client {
     public TransactionResult TPCC_newOrderWW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
 
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
 
             String tx = initResult.getMessage();
@@ -303,7 +303,7 @@ public class InteractiveClient extends Client {
 
     public TransactionResult TPCC_newOrderBamboo(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
 
             String tx = initResult.getMessage();
@@ -409,7 +409,7 @@ public class InteractiveClient extends Client {
     }
     public TransactionResult TPCC_newOrderSLW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
 
             String tx = initResult.getMessage();
@@ -568,7 +568,7 @@ public class InteractiveClient extends Client {
     }
     public TransactionResult TPCC_paymentWW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             try {
@@ -630,7 +630,7 @@ public class InteractiveClient extends Client {
 
     public TransactionResult TPCC_paymentBamboo(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             try {
@@ -694,7 +694,7 @@ public class InteractiveClient extends Client {
 
     public TransactionResult TPCC_paymentSLW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             try {
@@ -790,7 +790,7 @@ public class InteractiveClient extends Client {
     }
 
     public boolean readItem(List<String> items) {
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             if (mode.equals("bamboo")) {
@@ -839,8 +839,8 @@ public class InteractiveClient extends Client {
     }
 
     private void simulateDeadlock() {
-        String tx1 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx2 = blockingStub.beginTransaction(Empty.newBuilder().build()).getMessage();
+        String tx1 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx2 = blockingStub.beginTransaction(Data.newBuilder().build()).getMessage();
 
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(5);
         executor.submit(() -> lock(tx1, "Players", "PId", "10"));
@@ -891,7 +891,7 @@ public class InteractiveClient extends Client {
 
 //    remoteCalls : 4
 
-    public TransactionResult addListing(String PId, String IId, double price) {
+    public TransactionResult addListing(String PId, String IId, double price, String txId) {
         return switch (mode) {
             case "slw" -> addListingSLW(PId, IId, price);
             case "bamboo" -> addListingBamboo(PId, IId, price);
@@ -902,7 +902,7 @@ public class InteractiveClient extends Client {
 
     public TransactionResult addListingWW(String PId, String IId, double price) {
 
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         TransactionResult res = new TransactionResult();
         if (initResult.getStatus()) {
             String transactionId = initResult.getMessage();
@@ -959,7 +959,7 @@ public class InteractiveClient extends Client {
     public TransactionResult addListingBamboo(String PId, String IId, double price) {
 
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String transactionId = initResult.getMessage();
             try {
@@ -1018,7 +1018,7 @@ public class InteractiveClient extends Client {
 
     public TransactionResult buyListingBamboo(String PId, String LId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
 
         if (initResult.getStatus()) {
             String transactionId = initResult.getMessage();
@@ -1141,7 +1141,7 @@ public class InteractiveClient extends Client {
     public TransactionResult addListingSLW(String PId, String IId, double price) {
         log.info("add listing <PID:{}, IID:{}>", PId, IId);
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String transactionId = initResult.getMessage();
             try {
@@ -1179,7 +1179,7 @@ public class InteractiveClient extends Client {
         }
         return res;
     }
-    public TransactionResult buyListing(String PId, String LId) {
+    public TransactionResult buyListing(String PId, String LId, String txId) {
         return switch (mode) {
             case "slw" -> buyListingSLW(PId, LId);
             case "bamboo" -> buyListingBamboo(PId, LId);
@@ -1190,7 +1190,7 @@ public class InteractiveClient extends Client {
     public TransactionResult buyListingWW(String PId, String LId) {
 
         TransactionResult res = new TransactionResult();
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
 
         if (initResult.getStatus()) {
             String transactionId = initResult.getMessage();
@@ -1281,7 +1281,7 @@ public class InteractiveClient extends Client {
     public TransactionResult buyListingSLW(String PId, String LId) {
         TransactionResult res = new TransactionResult();
         log.info("buy listing <PID:{}, LID:{}>", PId, LId);
-        Result initResult = blockingStub.beginTransaction(Empty.newBuilder().build());
+        Result initResult = blockingStub.beginTransaction(Data.newBuilder().build());
 
         if (initResult.getStatus()) {
             String transactionId = initResult.getMessage();

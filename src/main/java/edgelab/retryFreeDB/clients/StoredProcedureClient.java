@@ -2,11 +2,11 @@ package edgelab.retryFreeDB.clients;
 
 import edgelab.proto.Config;
 import edgelab.proto.Data;
-import edgelab.proto.Empty;
 import edgelab.proto.Result;
 import edgelab.proto.TransactionId;
 import edgelab.retryFreeDB.RetryFreeDBServer;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.sql.SQLException;
@@ -39,6 +39,10 @@ public class StoredProcedureClient extends Client{
 
     private RetryFreeDBServer.RetryFreeDBService dbService;
     private RetryFreeDBServer.RetryFreeDBServiceWrapper blockingStub;
+
+    @Getter
+    public  Map<String, Long> pidAccessed = new ConcurrentHashMap<>();
+
     public StoredProcedureClient(String postgresAddress, String postgresPort, String[] tables, String mode) throws Exception {
         this.dbService = new RetryFreeDBServer.RetryFreeDBService(postgresAddress, postgresPort, tables);
         this.blockingStub = new RetryFreeDBServer.RetryFreeDBServiceWrapper(dbService);
@@ -61,8 +65,8 @@ public class StoredProcedureClient extends Client{
 
         Map<String, HashSet<String>> hotRecords = new HashMap<>();
 
-        client.addListing("1", "5", 1);
-        client.buyListing("1", "100001");
+        client.addListing("1", "5", 1, "");
+        client.buyListing("1", "100001", "");
 
 
 //          client.buyListing("2", "1");
@@ -86,12 +90,12 @@ public class StoredProcedureClient extends Client{
     }
 
     private void test() {
-        String tx1 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx2 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx3 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx4 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx5 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx6 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
+        String tx1 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx2 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx3 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx4 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx5 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx6 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
 
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(5);
         executor.submit(()->  {
@@ -198,7 +202,7 @@ public class StoredProcedureClient extends Client{
     public TransactionResult TPCC_newOrderWW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
 
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
 
             String tx = initResult.getMessage();
@@ -307,16 +311,16 @@ public class StoredProcedureClient extends Client{
         return res;
     }
 
-    private TransactionResult getCommitResult(DBTransaction tx, TransactionResult res) {
+    private void getCommitResult(DBTransaction tx, TransactionResult res) {
         Result commitResult = commit(tx);
-        res.setSuccess(true);
-        res.setMetrics(commitResult.getReturnsMap());
-        return res;
+        res.setSuccess(commitResult.getStatus());
+        if (commitResult.getStatus())
+            res.setMetrics(commitResult.getReturnsMap());
     }
 
     public TransactionResult TPCC_newOrderBamboo(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
 
             String tx = initResult.getMessage();
@@ -422,7 +426,7 @@ public class StoredProcedureClient extends Client{
     }
     public TransactionResult TPCC_newOrderSLW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
 
             String tx = initResult.getMessage();
@@ -581,7 +585,7 @@ public class StoredProcedureClient extends Client{
     }
     public TransactionResult TPCC_paymentWW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             try {
@@ -643,7 +647,7 @@ public class StoredProcedureClient extends Client{
 
     public TransactionResult TPCC_paymentBamboo(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             try {
@@ -707,7 +711,7 @@ public class StoredProcedureClient extends Client{
 
     public TransactionResult TPCC_paymentSLW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             try {
@@ -803,7 +807,7 @@ public class StoredProcedureClient extends Client{
     }
 
     public boolean readItem(List<String> items) {
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        Result initResult = dbService.beginTransaction(Data.newBuilder().build());
         if (initResult.getStatus()) {
             String tx = initResult.getMessage();
             if (mode.equals("bamboo")) {
@@ -852,8 +856,8 @@ public class StoredProcedureClient extends Client{
     }
 
     private void simulateDeadlock() {
-        String tx1 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
-        String tx2 = dbService.beginTransaction(Empty.newBuilder().build()).getMessage();
+        String tx1 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
+        String tx2 = dbService.beginTransaction(Data.newBuilder().build()).getMessage();
 
         ThreadPoolExecutor executor = (ThreadPoolExecutor) Executors.newFixedThreadPool(5);
         executor.submit(() -> lock(tx1, "Players", "PId", "10"));
@@ -904,21 +908,22 @@ public class StoredProcedureClient extends Client{
 
 //    remoteCalls : 4
 
-    public TransactionResult addListing(String PId, String IId, double price) {
+    public TransactionResult addListing(String PId, String IId, double price, String txId) {
         return switch (mode) {
-            case "slw" -> addListingSLW(PId, IId, price);
-            case "bamboo" -> addListingBamboo(PId, IId, price);
-            case "ww" -> addListingWW(PId, IId, price);
+            case "slw" -> addListingSLW(PId, IId, price, txId);
+            case "bamboo" -> addListingBamboo(PId, IId, price, txId);
+            case "ww" -> addListingWW(PId, IId, price, txId);
             default -> new TransactionResult();
         };
     }
 
-    public TransactionResult addListingWW(String PId, String IId, double price) {
+    public TransactionResult addListingWW(String PId, String IId, double price, String txId) {
 
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
         }
@@ -973,12 +978,17 @@ public class StoredProcedureClient extends Client{
 
 
     //    remoteCalls : 4
-    public TransactionResult addListingBamboo(String PId, String IId, double price) {
+    public TransactionResult addListingBamboo(String PId, String IId, double price, String txId) {
 
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
-        if (initResult.getStatus()) {
-            String transactionId = initResult.getMessage();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
             try {
 //
 //            Map<String, String> listing = read(transactionId, "Listings", "LIId", IId);
@@ -989,41 +999,41 @@ public class StoredProcedureClient extends Client{
 //                return;
 //            }
 
-                lock(transactionId, "Items", "IId", IId, READ_TYPE);
-                Map<String, String> item = read(transactionId, "Items", "IId", IId);
+                lock(dbTransaction, "Items", "IId", IId, READ_TYPE);
+                Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
                 if (item.isEmpty()) {
                     log.info("Item does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 //             Check the owner
                 if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
                     log.info("item has a different owner! {}<>{}", item.get("iowner"), PId);
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 
-                lock(transactionId, "Players", "PId", PId, READ_TYPE);
-                Map<String, String> player = read(transactionId, "Players", "PId", PId);
+                lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 //            Check player exists
                 if (player.isEmpty()) {
                     log.info("player does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
-                Result insertListingResult = insertLock(transactionId, "Listings");
+                Result insertListingResult = insertLock(dbTransaction, "Listings");
                 String listingRecordId = insertListingResult.getMessage();
-                insert(transactionId, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
+                insert(dbTransaction, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
 //
-                waitForCommit(transactionId);
+                waitForCommit(dbTransaction);
 
-                getCommitResult(transactionId, res);
+                getCommitResult(dbTransaction, res);
                 res.setMessage(listingRecordId);
                 return res;
             } catch (Exception e) {
-                rollback(transactionId);
+                rollback(dbTransaction);
                 return res;
             }
         }
@@ -1033,100 +1043,111 @@ public class StoredProcedureClient extends Client{
 
 
 
-    public TransactionResult buyListingBamboo(String PId, String LId) {
+    public TransactionResult buyListingBamboo(String PId, String LId, String txId) {
         TransactionResult res = new TransactionResult();
-        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
-
-        if (initResult.getStatus()) {
-            String transactionId = initResult.getMessage();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
             try {
 
                 //            R from L where Lid
-                lock(transactionId, "Listings", "LId", LId, READ_TYPE);
-                Map<String, String> listing = read(transactionId, "Listings", "LId", LId);
+                lock(dbTransaction, "Listings", "LId", LId, READ_TYPE);
+                Map<String, String> listing = read(dbTransaction, "Listings", "LId", LId);
 //            Check player exists
                 if (listing.isEmpty()) {
                     log.info("listing does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
                 //            Read from P where pid
-                lock(transactionId, "Players", "PId", PId, READ_TYPE);
+                lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
 //            TODO: WE MIGHT NEED TO ROLLBACK
-                Map<String, String> player = read(transactionId, "Players", "PId", PId);
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 //            Check player exists
                 if (player.isEmpty()) {
                     log.info("player does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
                 //            Check players cash for listing
                 if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
                     log.info("player does not have enough cash");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 
 //            Read from I where LIID
-                lock(transactionId, "Items", "IId", listing.get("liid"), READ_TYPE);
-                Map<String, String> item = read(transactionId, "Items", "IId", listing.get("liid"));
+                lock(dbTransaction, "Items", "IId", listing.get("liid"), READ_TYPE);
+                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("liid"));
                 //            Check item exists
                 if (item.isEmpty()) {
                     log.info("item does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 
 //            Delete from L where LID
-                lock(transactionId, "Listings", "LId", LId, WRITE_TYPE);
-                delete(transactionId, "Listings", "LId", LId);
+                lock(dbTransaction, "Listings", "LId", LId, WRITE_TYPE);
+                delete(dbTransaction, "Listings", "LId", LId);
 
 
 //            R from P where ppid
                 String PPId = item.get("iowner");
-                lock(transactionId, "Players", "PId", PPId, READ_TYPE);
-                Map<String, String> prevOwner = read(transactionId, "Players", "PId", PPId);
+                lock(dbTransaction, "Players", "PId", PPId, READ_TYPE);
+                Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
                 //            Check prevOwner exists
                 if (prevOwner.isEmpty()) {
                     log.info("previous owner does not exists!");
-                    commit(transactionId);
+                    commit(dbTransaction);
                     return res;
                 }
 
 //          W into I where IId = Liid SET Iowner = pid
-                lock(transactionId, "Items", "IId", listing.get("liid"), WRITE_TYPE);
-                write(transactionId, "Items", "IId", listing.get("liid"), "IOwner", PId);
+                lock(dbTransaction, "Items", "IId", listing.get("liid"), WRITE_TYPE);
+                write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
 
 
-                retireLock(transactionId, "Items", "IId", listing.get("liid"));
+                retireLock(dbTransaction, "Items", "IId", listing.get("liid"));
 
 //           W into P where Pid SET pCash = new Cash
-                lock(transactionId, "Players", "PId", PId, WRITE_TYPE);
+                lock(dbTransaction, "Players", "PId", PId, WRITE_TYPE);
                 String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
-                write(transactionId, "Players", "PId", PId, "Pcash", newCash);
+                write(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
 
 //           W into P where Pid SET pCash = new Cash
-                lock(transactionId, "Players", "PId", PPId, WRITE_TYPE);
+                lock(dbTransaction, "Players", "PId", PPId, WRITE_TYPE);
                 String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
-                write(transactionId, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
+                write(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
 
 
-                waitForCommit(transactionId);
+                waitForCommit(dbTransaction);
 
 //            Unlock
-                getCommitResult(transactionId, res);
+                getCommitResult(dbTransaction, res);
                 res.setMessage(listing.get("liid"));
                 return res;
             } catch (Exception e) {
-                rollback(transactionId);
+                rollback(dbTransaction);
                 return res;
             }
         }
         return res;
+    }
+    private Result waitForCommit(DBTransaction dbTransaction) throws Exception {
+        Result result = dbService.bambooWaitForCommit(dbTransaction);
+        log.info("{}, waitForCommit status: {} - message: {}",dbTransaction.getTimestamp(), result.getStatus(), result.getMessage());
+        if (!result.getStatus())
+            throw new Exception(result.getMessage());
+        return result;
     }
 
     private Result waitForCommit(String transactionId) throws Exception {
@@ -1135,6 +1156,19 @@ public class StoredProcedureClient extends Client{
         if (!result.getStatus())
             throw new Exception(result.getMessage());
         return result;
+    }
+
+    private Result retireLock(DBTransaction tx, String tableName, String key, String value) throws Exception {
+        Data lockData = Data.newBuilder()
+                .setTransactionId(tx.getTimestamp())
+                .setType(WRITE_TYPE)
+                .setKey(tableName + "," + key + "," + value)
+                .build();
+        Result retireResult = dbService.bambooRetireLock(lockData, tx);
+        log.info("{}, retire the lock {},{}:{} status: {} - message: {}",tx.getTimestamp(), tableName, key, value, retireResult.getStatus(), retireResult.getMessage());
+        if (!retireResult.getStatus())
+            throw new Exception(retireResult.getMessage());
+        return retireResult;
     }
 
     private Result retireLock(String transactionId, String tableName, String key, String value) throws Exception {
@@ -1159,12 +1193,13 @@ public class StoredProcedureClient extends Client{
 
 
     //    Remote calls: 4
-    public TransactionResult addListingSLW(String PId, String IId, double price) {
+    public TransactionResult addListingSLW(String PId, String IId, double price, String txId) {
         log.info("add listing <PID:{}, IID:{}>", PId, IId);
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
         }
@@ -1182,7 +1217,7 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 
-                lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
+                atomicLock(dbTransaction, "Players", "PId", List.of(PId));
                 unlock(dbTransaction, "Items", "IId", IId);
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 //            Check player exists
@@ -1205,20 +1240,114 @@ public class StoredProcedureClient extends Client{
         }
         return res;
     }
-    public TransactionResult buyListing(String PId, String LId) {
+    public TransactionResult lockOrderProblem(String PId, String PPId, String txId) {
         return switch (mode) {
-            case "slw" -> buyListingSLW(PId, LId);
-            case "bamboo" -> buyListingBamboo(PId, LId);
-            case "ww" -> buyListingWW(PId, LId);
+            case "slw" -> lockOrderProblemSLW(PId, PPId, txId);
+            case  "ww" -> lockOrderProblemWW(PId, PPId, txId);
             default -> new TransactionResult();
         };
     }
-    public TransactionResult buyListingWW(String PId, String LId) {
+    public TransactionResult lockOrderProblemSLW(String PId, String PPId, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+
+        if (dbTransaction != null) {
+            try {
+
+// Lock Try
+//                lock(dbTransaction, "Players", "PId", PId);
+//                if (Integer.parseInt(PPId) > Integer.parseInt(PId)) {
+//                    if (!tryLock(dbTransaction, "Players", "PId", PPId, WRITE_TYPE).getStatus()) {
+//                        unlock(dbTransaction, "Players", "PId", PId);
+//                        lock(dbTransaction, "Players", "PId", PPId);
+//                        lock(dbTransaction, "Players", "PId", PId);
+//                    }
+//                }
+//                else {
+//                    lock(dbTransaction, "Players", "PId", PPId);
+//                }
+
+// atomic lock
+                atomicLock(dbTransaction, "Players", "PId", List.of(PId, PPId));
+
+
+//            TODO: WE MIGHT NEED TO ROLLBACK
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+                Map<String, String> player2 = read(dbTransaction, "Players", "PId", PPId);
+
+                getCommitResult(dbTransaction, res);
+                this.pidAccessed.computeIfPresent(PId , (key, value) -> value + 1);
+                this.pidAccessed.computeIfPresent(PPId, (key, value) -> value + 1);
+                this.pidAccessed.putIfAbsent(PId, 1L);
+                this.pidAccessed.putIfAbsent( PPId, 1L);
+
+                return res;
+            } catch (Exception e) {
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+
+    }
+
+    public TransactionResult lockOrderProblemWW(String PId, String PPId, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+
+        if (dbTransaction != null) {
+            try {
+                lock(dbTransaction, "Players", "PId", PId);
+                lock(dbTransaction, "Players", "PId", PPId);
+
+
+
+//            TODO: WE MIGHT NEED TO ROLLBACK
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+                Map<String, String> player2 = read(dbTransaction, "Players", "PId", PPId);
+
+                getCommitResult(dbTransaction, res);
+                this.pidAccessed.computeIfPresent(PId , (key, value) -> value + 1);
+                this.pidAccessed.computeIfPresent(PPId, (key, value) -> value + 1);
+                this.pidAccessed.putIfAbsent(PId, 1L);
+                this.pidAccessed.putIfAbsent( PPId, 1L);
+
+                return res;
+            } catch (Exception e) {
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+
+    }
+    public TransactionResult buyListing(String PId, String LId, String txId) {
+        return switch (mode) {
+            case "slw" -> buyListingSLW(PId, LId, txId);
+            case "bamboo" -> buyListingBamboo(PId, LId, txId);
+            case "ww" -> buyListingWW(PId, LId, txId);
+            default -> new TransactionResult();
+        };
+    }
+    public TransactionResult buyListingWW(String PId, String LId, String txId) {
 
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
         }
@@ -1304,6 +1433,13 @@ public class StoredProcedureClient extends Client{
 //            Unlock
                 getCommitResult(dbTransaction, res);
                 res.setMessage(listing.get("liid"));
+
+
+//                this.pidAccessed.computeIfPresent(PId + PPId, (key, value) -> value + 1);
+//                this.pidAccessed.computeIfPresent(PPId, (key, value) -> value + 1);
+//                this.pidAccessed.putIfAbsent(PId, 1L);
+//                this.pidAccessed.putIfAbsent(PId + PPId, 1L);
+
                 return res;
             } catch (Exception e) {
                 rollback(dbTransaction);
@@ -1313,12 +1449,15 @@ public class StoredProcedureClient extends Client{
         return res;
     }
 
-    public TransactionResult buyListingSLW(String PId, String LId) {
+
+    public TransactionResult buyListingSLW(String PId, String LId, String txId) {
+
         TransactionResult res = new TransactionResult();
         log.info("buy listing <PID:{}, LID:{}>", PId, LId);
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
         }
@@ -1352,13 +1491,14 @@ public class StoredProcedureClient extends Client{
 
 //            Lock Players where pid, ppid
                 String PPId = item.get("iowner");
-                if (Integer.parseInt(PPId) > Integer.parseInt(PId)) {
-                    lock(dbTransaction, "Players", "PId", PId);
-                    lock(dbTransaction, "Players", "PId", PPId);
-                } else {
-                    lock(dbTransaction, "Players", "PId", PPId);
-                    lock(dbTransaction, "Players", "PId", PId);
-                }
+//                if (Integer.parseInt(PPId) > Integer.parseInt(PId)) {
+//                    lock(dbTransaction, "Players", "PId", PId);
+//                    lock(dbTransaction, "Players", "PId", PPId);
+//                } else {
+//                    lock(dbTransaction, "Players", "PId", PPId);
+//                    lock(dbTransaction, "Players", "PId", PId);
+//                }
+                atomicLock(dbTransaction, "Players", "PId", List.of(PId, PPId));
 
                 //            Read from P where pid
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
@@ -1388,8 +1528,7 @@ public class StoredProcedureClient extends Client{
 
 //            Delete from L where LID
                 delete(dbTransaction, "Listings", "LId", LId);
-
-//            unlock(transactionId, "Listings", "LId", LId);
+                unlock(dbTransaction, "Listings", "LId", LId);
 
 //          W into I where IId = Liid SET Iowner = pid
                 write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
@@ -1406,6 +1545,14 @@ public class StoredProcedureClient extends Client{
 //            Unlock
                 getCommitResult(dbTransaction, res);
                 res.setMessage(listing.get("liid"));
+
+//                this.pidAccessed.computeIfPresent(PId, (key, value) -> value + 1);
+//                this.pidAccessed.computeIfPresent(PPId, (key, value) -> value + 1);
+//                this.pidAccessed.putIfAbsent(PId, 1L);
+//                this.pidAccessed.putIfAbsent(PPId, 1L);
+//
+
+
                 return res;
             } catch (Exception e) {
                 log.error(e.getMessage());
@@ -1630,6 +1777,25 @@ public class StoredProcedureClient extends Client{
         log.info("{}, lock on {},{}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, key, value, lockResult.getStatus(), lockResult.getMessage());
         if (!lockResult.getStatus())
             throw new Exception(lockResult.getMessage());
+        return lockResult;
+    }
+
+    private Result atomicLock(DBTransaction transaction, String tableName, String key, List<String> values) throws Exception {
+        Result lockResult = dbService.atomicLock(transaction, tableName, key, values);
+        log.info("{}, lock on {},{}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, key, values, lockResult.getStatus(), lockResult.getMessage());
+        if (!lockResult.getStatus())
+            throw new Exception(lockResult.getMessage());
+        return lockResult;
+    }
+
+    private Result tryLock(DBTransaction transaction, String tableName, String key, String value, String type) throws Exception {
+        Data lockData = Data.newBuilder()
+                .setTransactionId(transaction.getTimestamp())
+                .setType(type)
+                .setKey(tableName + "," + key + "," + value)
+                .build();
+        Result lockResult = dbService.tryLock(transaction, lockData);
+        log.info("{}, lock on {},{}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, key, value, lockResult.getStatus(), lockResult.getMessage());
         return lockResult;
     }
 
