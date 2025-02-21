@@ -1,10 +1,12 @@
 package edgelab.retryFreeDB.repo.concurrencyControl;
 
+import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
 import java.util.Comparator;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.LinkedList;
 import java.util.Map;
 import java.util.PriorityQueue;
 import java.util.Queue;
@@ -23,13 +25,16 @@ class DBLock {
     private LockType ownersLockType;
     private final Queue<DBTransaction> retiredTransactions;
     private final Map<DBTransaction, LockType> retiredLockTypes;
+    @Getter
     private final Queue<DBTransaction> pendingTransactions;
     private final Map<DBTransaction, LockType> pendingLockTypes;
 
 
     public static boolean BAMBOO_ENABLE = false;
+    public static boolean WOUND_WAIT_ENABLE = false;
 
-    public DBLock(String resource) {
+
+    public DBLock(String resource, Boolean atomicLock) {
         this.resource = resource;
         this.holdingTransactions = new HashSet<>();
         this.retiredTransactions =  new PriorityQueue<>(new Comparator<DBTransaction>() {
@@ -39,14 +44,25 @@ class DBLock {
             }
         });
         this.retiredLockTypes = new HashMap<>();
-        this.pendingTransactions = new PriorityQueue<>(new Comparator<DBTransaction>() {
-            @Override
-            public int compare(DBTransaction s1, DBTransaction s2) {
-                return Long.compare(Long.parseLong(s1.getTimestamp()) ,Long.parseLong(s2.getTimestamp()));
-            }
-        });
         this.ownersLockType = null;
         this.pendingLockTypes = new HashMap<>();
+
+        if (!atomicLock)
+            this.pendingTransactions = new PriorityQueue<>(new Comparator<DBTransaction>() {
+                @Override
+                public int compare(DBTransaction s1, DBTransaction s2) {
+                    return Long.compare(Long.parseLong(s1.getTimestamp()) ,Long.parseLong(s2.getTimestamp()));
+
+                }
+            });
+        else
+            this.pendingTransactions = new PriorityQueue<>(new Comparator<DBTransaction>() {
+                @Override
+                public int compare(DBTransaction s1, DBTransaction s2) {
+                    return Long.compare(Long.parseLong(s2.getTimestamp()) ,Long.parseLong(s1.getTimestamp()));
+
+                }
+            });
     }
 
     public synchronized boolean canGrant(DBTransaction transaction, LockType lockType) {
@@ -120,7 +136,6 @@ class DBLock {
             }
         }
     }
-
     private boolean isGoingToBeUpgraded(DBTransaction transaction, LockType lockType) {
         if (lockType == LockType.WRITE)
             return (holdingTransactions.size() == 1 && holdingTransactions.contains(transaction));
@@ -164,8 +179,6 @@ class DBLock {
         retiredTransactions.remove(transaction);
         retiredLockTypes.remove(transaction);
     }
-
-
     public void retire(DBTransaction transaction) {
 //         TODO
         holdingTransactions.remove(transaction);
@@ -245,7 +258,10 @@ class DBLock {
 
     public void releasePending(DBTransaction transaction) {
         pendingTransactions.remove(transaction);
-        pendingLockTypes.remove(transaction);
+        if (holdingTransactions.contains(transaction))
+            pendingLockTypes.put(transaction, LockType.READ);
+        else
+            pendingLockTypes.remove(transaction);
     }
 }
 

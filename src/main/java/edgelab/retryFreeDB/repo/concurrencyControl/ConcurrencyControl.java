@@ -26,6 +26,7 @@ import java.sql.Statement;
 import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -44,16 +45,19 @@ public class ConcurrencyControl {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = false;
+                DBLock.WOUND_WAIT_ENABLE = false;
             }
             case "ww" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
                 DBLock.BAMBOO_ENABLE = false;
+                DBLock.WOUND_WAIT_ENABLE = true;
             }
             case "bamboo" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = true;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
                 DBLock.BAMBOO_ENABLE = true;
+                DBLock.WOUND_WAIT_ENABLE = true;
             }
             default -> throw new Exception("This mode of 2pl is not supported by server");
         }
@@ -108,7 +112,7 @@ public class ConcurrencyControl {
             lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
 
         log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
-        lock = locks.computeIfAbsent(resource, DBLock::new);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
 
 
         synchronized (lock) {
@@ -154,8 +158,159 @@ public class ConcurrencyControl {
         delay(LOCK_THINKING_TIME);
     }
 
+    public void tryLock(DBTransaction tx, DBData data) throws Exception {
+        if (BAMBOO_ENABLE || WOUND_WAIT_ENABLE)
+            throw new Exception("Brook2PL is not enabled!");
+
+        String resource = getResource(data);
+        DBLock lock;
+        LockType lockType = LockType.WRITE;
+        if (SHARED_LOCK_ENABLE)
+            lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
+
+
+
+        log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
+
+
+        synchronized (lock) {
+            if (tx.isAbort()) {
+                log.error("Transaction is aborted. Could not lock");
+                throw new Exception("Transaction aborted. can not lock");
+            }
+
+            if (!lock.isHeldBefore(tx, lockType)) {
+
+                lock.addPending(tx, lockType);
+                log.info("new pending transactons: {}", lock.printPendingLocks());
+
+
+                lock.promoteWaiters();
+                lock.notifyAll();
+
+                if (!lock.isHeldBefore(tx, lockType)) {
+                    lock.releasePending(tx);
+                    throw new Exception("Try failed: tx is not granted!");
+                }
+            }
+            tx.addResource(lock.getResource());
+            log.info("{}: Lock granted on {} for {}", tx, resource, lockType);
+        }
+
+        delay(LOCK_THINKING_TIME);
+    }
+
+    public boolean waitDieLock(DBTransaction tx, String resource) throws Exception {
+        // this method orders transactions based on
+        if (BAMBOO_ENABLE || WOUND_WAIT_ENABLE)
+            throw new Exception("Brook2PL is not enabled!");
+
+        DBLock lock;
+        LockType lockType = LockType.WRITE;
+
+
+        log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, true));
+
+
+        synchronized (lock) {
+            if (tx.isAbort()) {
+                log.error("Transaction is aborted. Could not lock");
+                throw new Exception("Transaction aborted. can not lock");
+            }
+
+            if (!lock.isHeldBefore(tx, lockType)) {
+
+
+
+                boolean hasConflict = false;
+                log.info("previous holding transactons: {}", lock.getHoldingTransactions());
+                log.info("previous pending transactons: {}", lock.printPendingLocks());
+                log.info("previous retired transactons: {}", lock.getRetiredTransactions());
+
+                Set<DBTransaction> toCheckTransactions = new HashSet<>(lock.getHoldingTransactions());
+//                toCheckTransactions.add(lock.getPendingTransactions().getLast());
+
+
+                for (DBTransaction t : toCheckTransactions) {
+                    if (lock.conflict(t, tx, lockType)) {
+                        hasConflict = true;
+                        log.info("{}: conflict detected {}", tx, t);
+                    }
+
+                    // can not lock if tx is younger
+                    if (hasConflict && Long.parseLong(t.toString()) < Long.parseLong(tx.toString())) {
+                        log.info("{}: can not lock {} -- too young", tx, resource);
+                        return false;
+                    }
+                }
+
+
+
+
+                lock.addPending(tx, lockType);
+                log.info("new pending transactons: {}", lock.printPendingLocks());
+
+
+                lock.promoteWaiters();
+                lock.notifyAll();
+
+                while (!lock.isHeldBefore(tx, lockType)) {
+                    try {
+                        log.info("{}: waiting for lock on {}", tx, resource);
+                        tx.startWaiting();
+                        lock.wait();
+                        if (tx.isAbort()) {
+                            log.error("Transaction is aborted. Could not lock");
+                            throw new Exception("Transaction aborted. can not lock");
+                        }
+                        log.info("{}: wakes up to check the lock {}", tx, resource);
+                        tx.wakesUp();
+
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+            tx.addResource(lock.getResource());
+            log.info("{}: Lock granted on {} for {}", tx, resource, lockType);
+        }
+
+        delay(LOCK_THINKING_TIME);
+        return true;
+    }
+    
+    public void atomicLock(DBTransaction tx, String tableName, List<String> values, Set<DBTransaction> toBeAborted) throws Exception {
+        boolean allLocked = false;
+        while (!allLocked) {
+            for (int i = 0; i < values.size(); i++) {
+
+                String resource = getResource(tableName, values.get(i));
+                if (!waitDieLock(tx, resource)) {
+                    for (int j = 0 ; j < i; j++) {
+                        String releaseResource = getResource(tableName, values.get(j));
+                        releaseLock(tx, releaseResource, toBeAborted);
+                    }
+                    tx.startWaiting();
+                    // Retry to get the locks in order after 8 micro second
+                    Thread.sleep(0, 8 * 1000);
+                    tx.wakesUp();
+                    break;
+                }
+                if (i == values.size() - 1)
+                    allLocked = true;
+            }
+        }
+    }
+
+    private static String getResource(String tableName, String value) {
+        return tableName + "," + value;
+    }
+
+
     private static String getResource(DBData data) {
-        return (data instanceof DBInsertData) ? data.getTable() + "," + ((DBInsertData) data).getRecordId() : data.getTable() + "," + Joiner.on(",").join(data.getQueries());
+        return (data instanceof DBInsertData) ? getResource(data.getTable(), ((DBInsertData) data).getRecordId()) : getResource(data.getTable(), Joiner.on(",").join(data.getQueries()));
     }
 
     private void addNewResourceForTransaction(String tx, String resource) {
@@ -387,7 +542,7 @@ public class ConcurrencyControl {
         DBLock lock;
 
         log.info("{}, retiring the lock {}", tx, resource);
-        lock = locks.computeIfAbsent(resource, DBLock::new);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
 
         if (lock != null) {
             synchronized (lock) {

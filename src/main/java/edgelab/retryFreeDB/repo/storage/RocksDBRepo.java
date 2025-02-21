@@ -107,7 +107,7 @@ public class RocksDBRepo implements KeyValueRepository{
 
     @Override
     public void insert(DBTransaction tx, DBInsertData data) throws Exception {
-        log.info("{}: insert {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
+        log.info("{}: insert {}:{}",tx.getTimestamp(), data.getTable(), data.getRecordId());
         String key = data.getTable() + ":" + data.getRecordId();
 
 
