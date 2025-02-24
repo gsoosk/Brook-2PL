@@ -79,7 +79,7 @@ public class InitStoreBenchmark {
             Map<String, String> player = new HashMap<>();
             player.put("Pname", "P" + randomString(NAME_LENGTH));
             player.put("Pcash", String.valueOf( (int) (PLAYER_CASH_MIN + (PLAYER_CASH_MAX - PLAYER_CASH_MIN) * random.nextDouble())));
-            db.put(key.getBytes(), objectToJson(player).getBytes());
+            db.put(key.getBytes(), objectToJson(player));
         }
         System.out.println("Players inserted.");
     }
@@ -93,7 +93,7 @@ public class InitStoreBenchmark {
                 Map<String, String> item = new HashMap<>();
                 item.put("IName", "I" + randomString(NAME_LENGTH));
                 item.put("IOwner", String.valueOf(playerId));
-                db.put(key.getBytes(), objectToJson(item).getBytes());
+                db.put(key.getBytes(), objectToJson(item));
             }
         }
         System.out.println("Items inserted.");
@@ -109,7 +109,7 @@ public class InitStoreBenchmark {
             Map<String, String> listing = new HashMap<>();
             listing.put("LIId", String.valueOf(randomItemId));
             listing.put("LPrice", String.valueOf((int) (ITEM_PRICE_MIN + (ITEM_PRICE_MAX - ITEM_PRICE_MIN) * random.nextDouble())));
-            db.put(key.getBytes(), objectToJson(listing).getBytes());
+            db.put(key.getBytes(), objectToJson(listing));
         }
         System.out.println("Listings inserted.");
     }
@@ -129,9 +129,9 @@ public class InitStoreBenchmark {
         return UUID.randomUUID().toString().replace("-", "").substring(0, length);
     }
 
-    private static String objectToJson(Object obj) {
+    private static byte[] objectToJson(Object obj) {
         try {
-            return objectMapper.writeValueAsString(obj);
+            return objectMapper.writeValueAsBytes(obj);
         } catch (IOException e) {
             e.printStackTrace();
             return null;
@@ -176,7 +176,7 @@ public class InitStoreBenchmark {
                 String listingKey = "Listings:" + itemsListings.get(itemId);
                 byte[] listingData = db.get(listingKey.getBytes());
                 if (listingData != null) {
-                    Map<String, String> listingMap = objectMapper.readValue(new String(listingData), Map.class);
+                    Map<String, String> listingMap = objectMapper.readValue(listingData, Map.class);
                     String lId = listingKey.split(":")[1];
                     String lIId = listingMap.get("LIId");
                     String lPrice = listingMap.get("LPrice");

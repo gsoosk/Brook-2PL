@@ -186,7 +186,7 @@ public class Performance {
 //    Multi-threading
     private int MAX_THREADS = 60;
     private int MAX_ITEM_READ_THREADS = 20;
-    private int MAX_QUEUE_SIZE = MAX_THREADS * 3;
+    private int MAX_QUEUE_SIZE = MAX_ITEM_READ_THREADS * 3;
     private int MAX_RETRY = -1;
     private ThreadPoolExecutor executor;
     private ThreadPoolExecutor itemExecutor;
@@ -195,7 +195,7 @@ public class Performance {
 //    private ConcurrentLinkedQueue<Pair<String, String>> hotPlayersAndItems; // purchasable items pid,iid
     private List<Pair<String, String>> hotPlayersAndItems = new CopyOnWriteArrayList<>();
     private List<String> hotPlayers = new CopyOnWriteArrayList<>();
-    private final List<String> hotItems = new ArrayList<>(); // for read only tx
+    private final List<String> hotItems = new CopyOnWriteArrayList<>(); // for read only tx
 //    private ConcurrentLinkedQueue<Pair<String, String>> hotListings; // current listings: lid, iid
     private List<Pair<String, String>> hotListings = new CopyOnWriteArrayList<>();
     private final Set<String> readOnlyHotListings = ConcurrentHashMap.newKeySet();
@@ -559,36 +559,25 @@ public class Performance {
         itemExecutor = (ThreadPoolExecutor) Executors.newFixedThreadPool(MAX_ITEM_READ_THREADS);
         itemThread = Executors.defaultThreadFactory().newThread(() -> {
             log.info("Item read thread has been created");
-
-            while ((System.currentTimeMillis() - sendingStart) / 1000 < benchmarkTime) {
-                // generate a List that contains the numbers 0 to 9
-                List<Integer> indices = IntStream.range(0, hotItems.size()).boxed().collect(Collectors.toList());
-                Collections.shuffle(indices);
-                List<String> itemsToGet = new ArrayList<>();
-                for (int i = 0; i < numberOfItemsToRead; i++) {
-                    itemsToGet.add(hotItems.get(indices.get(i)));
-                }
-
-
+            for (int j = 0; j < MAX_ITEM_READ_THREADS; j++) {
                 itemExecutor.submit(() -> {
-                    int itemId = random.nextInt(hotItems.size());
-                    boolean status = client.readItem(itemsToGet);
-                    log.info("Item {} read finished", hotItems.get(itemId));
-                    if (status)
-                        stats.itemReadFinished();
+                    while (stats.isRunning()) {
+                        // generate a List that contains the numbers 0 to hotItems.Size
+                        List<String> copyHotItems = new ArrayList<>(hotItems);
+                        List<String> itemsToGet = new ArrayList<>();
+                        for (int i = 0; i < numberOfItemsToRead; i++) {
+                            int randomIndex = random.nextInt(copyHotItems.size());
+                            itemsToGet.add(copyHotItems.get(randomIndex));
+                            copyHotItems.remove(randomIndex);
+                        }
+
+
+                        boolean status = client.readItem(itemsToGet);
+                        log.info("Items {} read finished", copyHotItems);
+                        if (status)
+                            stats.itemReadFinished();
+                    }
                 });
-
-
-                while (itemExecutor.getQueue().size() >= MAX_QUEUE_SIZE) {
-                    if ((System.currentTimeMillis() - sendingStart) / 1000 >= benchmarkTime)
-                        break;
-//                    try {
-//                        log.debug("sleep");
-//                        Thread.sleep(1);
-//                    } catch (InterruptedException e) {
-//                        e.printStackTrace();
-//                    }
-                }
             }
         });
         itemThread.start();
@@ -817,17 +806,8 @@ public class Performance {
     }
 
     private void executeRequestFromThreadPool(ServerRequest request, Stats stats) {
-//        stats.nextAdded(1);
         log.info("submitting the request {}", request.getValues());
         submitRequest(request, stats);
-//        while (executor.getQueue().size() >= MAX_QUEUE_SIZE) {
-//            try {
-//                log.debug("sleep");
-////                Thread.sleep(1);
-//            } catch (InterruptedException e) {
-//                e.printStackTrace();
-//            }
-//        }
     }
 
     private void submitRequest(ServerRequest request, Stats stats) {
@@ -838,61 +818,58 @@ public class Performance {
     }
 
     private void submitRequest(TPCCServerRequest request, Stats stats) {
-        Future<Void> future = executor.submit(()->{
-            Client.TransactionResult result = new Client.TransactionResult();
-            if (request.getType() == TPCCServerRequest.Type.PAYMENT) {
-                Map<String, String> tx = request.getValues();
-                result = client.TPCC_payment(tx.get("warehouseId"),
-                        tx.get("districtId"),
-                        Float.parseFloat(tx.get("paymentAmount")),
-                        tx.get("customerWarehouseId"),
-                        tx.get("customerDistrictId"),
-                        tx.get("customerId"));
-                if (!result.isSuccess()) {
-                    log.error("Unsuccessful TPCC Payment {}", tx);
+        Client.TransactionResult result = new Client.TransactionResult();
+        if (request.getType() == TPCCServerRequest.Type.PAYMENT) {
+            Map<String, String> tx = request.getValues();
+            result = client.TPCC_payment(tx.get("warehouseId"),
+                    tx.get("districtId"),
+                    Float.parseFloat(tx.get("paymentAmount")),
+                    tx.get("customerWarehouseId"),
+                    tx.get("customerDistrictId"),
+                    tx.get("customerId"));
+            if (!result.isSuccess()) {
+                log.error("Unsuccessful TPCC Payment {}", tx);
+                stats.addWaistedTime(result.getStart());
+                submitRetry(request, stats);
+            }
+        }
+        else if (request.getType() == TPCCServerRequest.Type.NEW_ORDER) {
+            result = client.TPCC_newOrder(request.getValues().get("warehouseId"),
+                   request.getValues().get("districtId"),
+                   request.getValues().get("customerId"),
+                   request.getValues().get("orderLineCount"),
+                   request.getValues().get("allLocals"),
+                   request.getArrayValues().get("itemIds"),
+                   request.getArrayValues().get("supplierWarehouseIds"),
+                   request.getArrayValues().get("orderQuantities"));
+
+            if (!result.isSuccess()) {
+                if (!request.isUserAbort()) {
+                    log.error("Unsuccessful TPCC new order {},{}", request.getValues(), request.getArrayValues());
                     stats.addWaistedTime(result.getStart());
                     submitRetry(request, stats);
                 }
-            }
-            else if (request.getType() == TPCCServerRequest.Type.NEW_ORDER) {
-                result = client.TPCC_newOrder(request.getValues().get("warehouseId"),
-                       request.getValues().get("districtId"),
-                       request.getValues().get("customerId"),
-                       request.getValues().get("orderLineCount"),
-                       request.getValues().get("allLocals"),
-                       request.getArrayValues().get("itemIds"),
-                       request.getArrayValues().get("supplierWarehouseIds"),
-                       request.getArrayValues().get("orderQuantities"));
-
-                if (!result.isSuccess()) {
-                    if (!request.isUserAbort()) {
-                        log.error("Unsuccessful TPCC new order {},{}", request.getValues(), request.getArrayValues());
-                        stats.addWaistedTime(result.getStart());
-                        submitRetry(request, stats);
-                    }
-                    else {
-                        log.error("User Abort TPCC new order {},{}", request.getValues(), request.getArrayValues());
-                    }
+                else {
+                    log.error("User Abort TPCC new order {},{}", request.getValues(), request.getArrayValues());
                 }
             }
+        }
 
-            if (result.isSuccess()) {
-                stats.nextCompletion(request.start, 1);
-                long now = System.nanoTime();
-                stats.addAblationTimes(now, result.getStart(),
-                        Long.parseLong(result.getMetrics().get("waiting_time")),
-                        Long.parseLong(result.getMetrics().get("io_time")),
-                        Long.parseLong(result.getMetrics().get("locking_time")),
-                        Long.parseLong(result.getMetrics().get("retiring_time")),
-                        Long.parseLong(result.getMetrics().get("initiation_time")),
-                        Long.parseLong(result.getMetrics().get("unlocking_time")),
-                        Long.parseLong(result.getMetrics().get("committing_time")),
-                        Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
-                        Long.parseLong(result.getMetrics().get("rolling_back_time")));
-                log.info("request successful {}:{}", request.getType(),request.getValues());
-            }
-            return null;
-        });
+        if (result.isSuccess()) {
+            stats.nextCompletion(request.start, 1);
+            long now = System.nanoTime();
+            stats.addAblationTimes(now, result.getStart(),
+                    Long.parseLong(result.getMetrics().get("waiting_time")),
+                    Long.parseLong(result.getMetrics().get("io_time")),
+                    Long.parseLong(result.getMetrics().get("locking_time")),
+                    Long.parseLong(result.getMetrics().get("retiring_time")),
+                    Long.parseLong(result.getMetrics().get("initiation_time")),
+                    Long.parseLong(result.getMetrics().get("unlocking_time")),
+                    Long.parseLong(result.getMetrics().get("committing_time")),
+                    Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
+                    Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            log.info("request successful {}:{}", request.getType(),request.getValues());
+        }
 
     }
 

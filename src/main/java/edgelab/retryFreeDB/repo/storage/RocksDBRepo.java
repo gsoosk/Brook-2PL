@@ -1,6 +1,8 @@
 package edgelab.retryFreeDB.repo.storage;
 
+import com.fasterxml.jackson.core.JsonParser;
 import com.fasterxml.jackson.core.JsonProcessingException;
+import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import edgelab.retryFreeDB.init.InitStoreBenchmark;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
@@ -22,7 +24,10 @@ import java.io.IOException;
 import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
 import java.nio.file.Files;
+import java.util.AbstractMap;
+import java.util.ArrayList;
 import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
@@ -42,12 +47,10 @@ public class RocksDBRepo implements KeyValueRepository{
     private Map<String, Map<String, String>> rocksDB = new ConcurrentHashMap<>();
     private static final ObjectMapper objectMapper = new ObjectMapper();
     public RocksDBRepo(String dbDirectory) throws RocksDBException {
-
-
         try (Options options = new Options().setCreateIfMissing(false);
              RocksDB db = RocksDB.open(options, dbDirectory)) {
              RocksIterator iterator = db.newIterator();
-             ExecutorService executor = Executors.newFixedThreadPool(32);
+             ExecutorService executor =  Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
 
             iterator.seekToFirst();
             while (iterator.isValid()) {
@@ -58,8 +61,8 @@ public class RocksDBRepo implements KeyValueRepository{
                 executor.execute(() -> {
                     try {
                         String key = new String(keyBytes, StandardCharsets.UTF_8);
-                        String value = new String(valueBytes, StandardCharsets.UTF_8);
-                        rocksDB.put(key, objectMapper.readValue(value, Map.class));
+                        Map<String, String> value = objectMapper.readValue(valueBytes, Map.class);
+                        rocksDB.put(key, value);
                     } catch (Exception e) {
                         e.printStackTrace();
                     }
@@ -73,7 +76,6 @@ public class RocksDBRepo implements KeyValueRepository{
         }
 
         System.out.println("Loaded " + rocksDB.size() + " entries into HashMap");
-
 
 
 //        DBInit(dbDirectory);

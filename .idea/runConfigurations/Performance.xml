@@ -2,7 +2,6 @@
   <configuration default="false" name="Performance" type="Application" factoryName="Application" nameIsGenerated="true">
     <option name="MAIN_CLASS_NAME" value="edgelab.retryFreeDB.benchmark.Performance" />
     <module name="slwgraph" />
-    <option name="PROGRAM_PARAMETERS" value="--address localhost --port 8000 --throughput -1 --benchmark-time 50 --hot-players ./scripts/hot_records_128_items --hot-listings ./scripts/hot_records_128_listings --hot-selection-prob 0 --max-threads 60 --max-retry 10 --read-item-number -1 --max-items-threads 10 --operation-delay 0 --2pl-mode bamboo --benchmark-mode store --num-of-warehouses 8 --hot-warehouses 1" />
     <extension name="coverage">
       <pattern>
         <option name="PATTERN" value="edgelab.retryFreeDB.benchmark.util.*" />
