@@ -1,30 +1,21 @@
 package edgelab.retryFreeDB.repo.concurrencyControl;
 
 import com.google.common.base.Joiner;
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import edgelab.proto.LockData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBDeleteData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBInsertData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBWriteData;
 import edgelab.retryFreeDB.repo.concurrencyControl.util.BiKeyHashMap;
+import edgelab.retryFreeDB.repo.storage.InMemoryRepo;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
-import edgelab.retryFreeDB.repo.storage.RocksDBRepo;
 import lombok.extern.slf4j.Slf4j;
-import org.postgresql.PGConnection;
 import org.rocksdb.RocksDBException;
 
 import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
@@ -80,8 +71,10 @@ public class ConcurrencyControl {
     public ConcurrencyControl(String addr, String port) throws RocksDBException {
         String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
 //        TODO: fix rollback
-        if (Objects.equals(port, "-1"))
-            keyValueRepository = new RocksDBRepo(addr);
+        if (Objects.equals(port, "-1")) {
+            keyValueRepository = new InMemoryRepo(addr);
+            this.locks = new ConcurrentHashMap<>(((InMemoryRepo) keyValueRepository).getDBSize(), 0.75f);
+        }
         else
             keyValueRepository = new PostgresRepo(url);
 
@@ -102,16 +95,27 @@ public class ConcurrencyControl {
 
 
 
-    private final Map<String, DBLock> locks = new ConcurrentHashMap<>();
+    private Map<String, DBLock> locks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> transactionResources = new ConcurrentHashMap<>();
+
+    public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, LockData data) throws Exception {
+        String resource = data.getResource();
+        LockType lockType = LockType.WRITE;
+        if (SHARED_LOCK_ENABLE)
+            lockType = data.getLockType() == edgelab.proto.LockType.READ ? LockType.READ : LockType.WRITE;
+        lockLogic(tx, toBeAborted, resource, lockType);
+    }
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, DBData data) throws Exception {
         String resource = getResource(data);
-        DBLock lock;
         LockType lockType = LockType.WRITE;
         if (SHARED_LOCK_ENABLE)
             lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
+        lockLogic(tx, toBeAborted, resource, lockType);
+    }
 
-        log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
+    private void lockLogic(DBTransaction tx, Set<DBTransaction> toBeAborted, String resource, LockType lockType) throws Exception {
+        DBLock lock;
+        log.info("{}, try to lock {}, <{}>", tx, resource, lockType);
         lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
 
 
@@ -434,11 +438,11 @@ public class ConcurrencyControl {
         String resource = getResource(data);
 
         if (keyValueRepository instanceof PostgresRepo) {
-            String dirtyRead = keyValueRepository.read(tx, data);
-            synchronized (dirtyReads) {
-                log.info("{}: adding dirty read for {}", tx, resource);
-                dirtyReads.put(tx.toString(), resource, dirtyRead);
-            }
+//            String dirtyRead = keyValueRepository.read(tx, data);
+//            synchronized (dirtyReads) {
+//                log.info("{}: adding dirty read for {}", tx, resource);
+//                dirtyReads.put(tx.toString(), resource, dirtyRead);
+//            }
         }
 
         releaseLock(tx, resource, toBeAborted);
@@ -451,6 +455,8 @@ public class ConcurrencyControl {
         synchronized (lock) {
             lock.promoteWaiters();
             lock.notifyAll(); // Notify all waiting threads
+//            if (lock.isEmpty())
+//                locks.remove(resource);
         }
     }
 
@@ -557,11 +563,11 @@ public class ConcurrencyControl {
             }
 
             if (keyValueRepository instanceof PostgresRepo) {
-                String dirtyRead = keyValueRepository.read(tx, data);
-                synchronized (dirtyReads) {
-                    log.info("{}: adding dirty read for {}", tx, resource);
-                    dirtyReads.put(tx.toString(), resource, dirtyRead);
-                }
+//                String dirtyRead = keyValueRepository.read(tx, data);
+//                synchronized (dirtyReads) {
+//                    log.info("{}: adding dirty read for {}", tx, resource);
+//                    dirtyReads.put(tx.toString(), resource, dirtyRead);
+//                }
             }
         }
         else {
@@ -634,24 +640,24 @@ public class ConcurrencyControl {
 
 
 
-    public String get(DBTransaction tx, DBData data) throws Exception {
+    public Map<String, String> get(DBTransaction tx, DBData data) throws Exception {
         String resource = getResource(data);
 
         long last = System.currentTimeMillis();
         if (keyValueRepository instanceof PostgresRepo) {
-            synchronized (dirtyReads) {
-                if (dirtyReads.containsResource(resource)) {
-                    log.info("{}: dirty read of {}", tx, resource);
-                    delay(OPERATION_THINKING_TIME);
-                    return dirtyReads.getByResource(resource);
-                }
-            }
+//            synchronized (dirtyReads) {
+//                if (dirtyReads.containsResource(resource)) {
+//                    log.info("{}: dirty read of {}", tx, resource);
+//                    delay(OPERATION_THINKING_TIME);
+//                    return dirtyReads.getByResource(resource);
+//                }
+//            }
 
             log.info("{}: dirty read time: {}", tx.getTimestamp(), System.currentTimeMillis() - last);
         }
 
 
-        String value = keyValueRepository.read(tx, data);
+        Map<String, String> value = keyValueRepository.read(tx, data);
         delay(OPERATION_THINKING_TIME);
         return value;
     }

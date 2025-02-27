@@ -3,7 +3,6 @@ package edgelab.retryFreeDB.clients;
 import edgelab.proto.Config;
 import edgelab.proto.RetryFreeDBServerGrpc;
 import edgelab.proto.Data;
-import edgelab.proto.Empty;
 import edgelab.proto.TransactionId;
 import edgelab.proto.Result;
 import io.grpc.ManagedChannel;
@@ -71,10 +70,10 @@ public class InteractiveClient extends Client {
 
 
 
-        client.TPCC_newOrder("1", "2", "3", "3", "1",
-                new int[]{1,2,3},
-                new int[]{1,1,1},
-                new int[]{1,2,3});
+//        client.TPCC_newOrder("1", "2", "3", "3", "1",
+//                new int[]{1,2,3},
+//                new int[]{1,1,1},
+//                new int[]{1,2,3}, request.getTxId());
 
 
     }
@@ -168,7 +167,7 @@ public class InteractiveClient extends Client {
 //        commit(tx1);
 
     }
-    public TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs,  int[] supplierWarehouseIDs, int[] orderQuantities) {
+    public TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
         switch (mode) {
             case "ww" -> {
                 return TPCC_newOrderWW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities);
@@ -549,7 +548,7 @@ public class InteractiveClient extends Client {
     }
 
 
-    public TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
+    public TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         switch (mode) {
             case "ww" -> {
                 return TPCC_paymentWW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId);

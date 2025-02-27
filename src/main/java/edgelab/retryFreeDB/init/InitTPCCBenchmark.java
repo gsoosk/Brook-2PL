@@ -20,20 +20,24 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Random;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.TimeUnit;
 
 @Slf4j
 public class InitTPCCBenchmark {
 
     private static final int FIRST_UNPROCESSED_O_ID = 2101;
-    private static final int BATCH_SIZE = 10000;
+    private static final int BATCH_SIZE = 100000;
     private static final int CONFIG_ITEM_COUNT = 100000;
     private static final int CONFIG_CUST_PER_DISTRICT = 3000;
     private static final int CONFIG_DIST_PER_WAREHOUSE = 10;
 
-    private static long numWarehouses = 1;
+
+    private static Map<String, Map<String, String>> inMemoryDb = new ConcurrentHashMap<>();
+    private static boolean LOAD_TO_MEMORY = false;
 
     public static RocksDB db;
     public static Random rng = new Random(123);
@@ -46,7 +50,6 @@ public class InitTPCCBenchmark {
         }
 
         String checkpointDir = args[0];
-        numWarehouses = Integer.parseInt(args[1]);
 
         String dbPath;
         try {
@@ -57,13 +60,14 @@ public class InitTPCCBenchmark {
 
         System.out.println("Database path: " + dbPath);
         System.out.println("Checkpoint directory: " + checkpointDir);
+        LOAD_TO_MEMORY = false;
 
         RocksDB.loadLibrary();
         try (Options options = new Options().setCreateIfMissing(true).setWriteBufferSize(16L * 1024 * 1024 * 1024)) {
             db = RocksDB.open(options, dbPath);
 
 
-            load();
+            load(Integer.parseInt(args[1]));
 
             // Create checkpoint
             createCheckpoint(db, checkpointDir);
@@ -89,7 +93,18 @@ public class InitTPCCBenchmark {
     public InitTPCCBenchmark() {
     }
 
-    public static void load() throws RocksDBException {
+    public static Map<String, Map<String, String>> loadToMemory(int numWarehouses) {
+        LOAD_TO_MEMORY = true;
+        try {
+            load(numWarehouses);
+            System.out.println(inMemoryDb.size());
+        } catch (RocksDBException e) {
+            throw new RuntimeException(e);
+        }
+        return inMemoryDb;
+    }
+
+    public static void load(int numWarehouses) throws RocksDBException {
         loadItems(CONFIG_ITEM_COUNT);
 
         // WAREHOUSES
@@ -148,7 +163,9 @@ public class InitTPCCBenchmark {
 
     protected static void loadItems(int itemCount) throws RocksDBException {
         int batchSize = 0;
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         for (int i = 1; i <= itemCount; i++) {
 
             Map<String, String> item = new HashMap<>();
@@ -176,17 +193,21 @@ public class InitTPCCBenchmark {
 
 
             String key = "item:" + i_id;
-            writeBatch.put(key.getBytes(), objectToJson(item));
+
+            if (LOAD_TO_MEMORY)
+                inMemoryDb.put(key, item);
+            else
+                writeBatch.put(key.getBytes(), objectToJson(item));
             batchSize++;
 
-            if (batchSize == BATCH_SIZE) {
+            if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                 db.write(new WriteOptions(), writeBatch);
                 writeBatch = new WriteBatch();
                 batchSize = 0;
             }
         }
 
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
 
@@ -205,10 +226,15 @@ public class InitTPCCBenchmark {
         warehouse.put("w_state", TPCCUtil.randomStr(3).toUpperCase());
         warehouse.put("w_zip", "123456789");
 
-        db.put(("warehouse:" + w_id).getBytes(), objectToJson(warehouse));
+        if (!LOAD_TO_MEMORY)
+            db.put(("warehouse:" + w_id).getBytes(), objectToJson(warehouse));
+        else
+            inMemoryDb.put(("warehouse:" + w_id), warehouse);
     }
     protected static void loadStock(int w_id, int numItems) throws RocksDBException {
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         int batchSize = 0;
         for (int i = 1; i <= numItems; i++) {
             Map<String, String> stock = new HashMap<>();
@@ -232,16 +258,19 @@ public class InitTPCCBenchmark {
                 stock.put("s_dist_" + j, TPCCUtil.randomStr(24));
             }
 
-            writeBatch.put(("stock:" + w_id + "," + i).getBytes(), objectToJson(stock));
+            if (LOAD_TO_MEMORY)
+                inMemoryDb.put(("stock:" + w_id + "," + i), stock);
+            else
+                writeBatch.put(("stock:" + w_id + "," + i).getBytes(), objectToJson(stock));
             batchSize++;
 
-            if (batchSize == BATCH_SIZE) {
+            if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                 db.write(new WriteOptions(), writeBatch);
                 writeBatch = new WriteBatch();
                 batchSize = 0;
             }
         }
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
     }
@@ -260,13 +289,18 @@ public class InitTPCCBenchmark {
             district.put("d_state", TPCCUtil.randomStr(3).toUpperCase());
             district.put("d_zip", "123456789");
 
-            db.put(("district:" + w_id + "," + d).getBytes(), objectToJson(district));
+            if (LOAD_TO_MEMORY)
+                inMemoryDb.put(("district:" + w_id + "," + d), district);
+            else
+                db.put(("district:" + w_id + "," + d).getBytes(), objectToJson(district));
         }
 
     }
 
     protected static void loadCustomers(int w_id, int districtsPerWarehouse, int customersPerDistrict) throws RocksDBException {
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         int batchSize = 0;
         for (int d = 1; d <= districtsPerWarehouse; d++) {
             for (int c = 1; c <= customersPerDistrict; c++) {
@@ -294,24 +328,30 @@ public class InitTPCCBenchmark {
                 customer.put("c_middle", "OE");
                 customer.put("c_data", TPCCUtil.randomStr(TPCCUtil.randomNumber(300, 500, rng)));
 
-                writeBatch.put(("customer:" + w_id + "," + d + "," + c).getBytes(), objectToJson(customer));
+
+                if (LOAD_TO_MEMORY)
+                    inMemoryDb.put(("customer:" + w_id + "," + d + "," + c), customer);
+                else
+                    writeBatch.put(("customer:" + w_id + "," + d + "," + c).getBytes(), objectToJson(customer));
                 batchSize++;
 
-                if (batchSize == BATCH_SIZE) {
+                if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                     db.write(new WriteOptions(), writeBatch);
                     writeBatch = new WriteBatch();
                     batchSize = 0;
                 }
             }
         }
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
     }
 
 
     protected static void loadCustomerHistory(int w_id, int districtsPerWarehouse, int customersPerDistrict) throws RocksDBException {
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         int batchSize = 0;
         for (int d = 1; d <= districtsPerWarehouse; d++) {
             for (int c = 1; c <= customersPerDistrict; c++) {
@@ -326,23 +366,29 @@ public class InitTPCCBenchmark {
                 history.put("h_amount", "10");
                 history.put("h_data", TPCCUtil.randomStr(TPCCUtil.randomNumber(10, 24, rng)));
 
-                writeBatch.put(("history:" + w_id + "," + d + "," + c).getBytes(), objectToJson(history));
+
+                if (LOAD_TO_MEMORY)
+                    inMemoryDb.put(("history:" + w_id + "," + d + "," + c), history);
+                else
+                    writeBatch.put(("history:" + w_id + "," + d + "," + c).getBytes(), objectToJson(history));
                 batchSize++;
 
-                if (batchSize == BATCH_SIZE) {
+                if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                     db.write(new WriteOptions(), writeBatch);
                     writeBatch = new WriteBatch();
                     batchSize = 0;
                 }
             }
         }
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
     }
 
     protected static void loadOpenOrders(int w_id, int districtsPerWarehouse, int customersPerDistrict) throws RocksDBException {
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         int batchSize = 0;
         for (int d = 1; d <= districtsPerWarehouse; d++) {
             int[] c_ids = new int[customersPerDistrict];
@@ -368,17 +414,20 @@ public class InitTPCCBenchmark {
                 order.put("o_all_local", "1");
                 order.put("o_entry_d", sysdate.toString());
 
-                writeBatch.put(("oorder:" + w_id + "," + d + "," + c).getBytes(), objectToJson(order));
+                if (LOAD_TO_MEMORY)
+                    inMemoryDb.put(("oorder:" + w_id + "," + d + "," + c), order);
+                else
+                    writeBatch.put(("oorder:" + w_id + "," + d + "," + c).getBytes(), objectToJson(order));
                 batchSize++;
 
-                if (batchSize == BATCH_SIZE) {
+                if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                     db.write(new WriteOptions(), writeBatch);
                     writeBatch = new WriteBatch();
                     batchSize = 0;
                 }
             }
         }
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
     }
@@ -392,7 +441,9 @@ public class InitTPCCBenchmark {
 
 
     protected static void loadNewOrders(int w_id, int districtsPerWarehouse, int customersPerDistrict) throws RocksDBException {
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         int batchSize = 0;
         for (int d = 1; d <= districtsPerWarehouse; d++) {
             for (int c = FIRST_UNPROCESSED_O_ID; c <= customersPerDistrict; c++) {
@@ -401,22 +452,27 @@ public class InitTPCCBenchmark {
                 newOrder.put("no_d_id", String.valueOf(d));
                 newOrder.put("no_o_id", String.valueOf(c));
 
-                writeBatch.put(("new_order:" + w_id + "," + d + "," + c).getBytes(), objectToJson(newOrder));
+                if (LOAD_TO_MEMORY)
+                    inMemoryDb.put(("new_order:" + w_id + "," + d + "," + c), newOrder);
+                else
+                    writeBatch.put(("new_order:" + w_id + "," + d + "," + c).getBytes(), objectToJson(newOrder));
                 batchSize++;
 
-                if (batchSize == BATCH_SIZE) {
+                if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                     db.write(new WriteOptions(), writeBatch);
                     writeBatch = new WriteBatch();
                     batchSize = 0;
                 }
             }
         }
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
     }
     protected static void loadOrderLines(int w_id, int districtsPerWarehouse, int customersPerDistrict) throws RocksDBException {
-        WriteBatch writeBatch = new WriteBatch();
+        WriteBatch writeBatch = null;
+        if (!LOAD_TO_MEMORY)
+            writeBatch = new WriteBatch();
         int batchSize = 0;
         for (int d = 1; d <= districtsPerWarehouse; d++) {
             for (int c = 1; c <= customersPerDistrict; c++) {
@@ -439,10 +495,13 @@ public class InitTPCCBenchmark {
                     orderLine.put("ol_quantity", "5");
                     orderLine.put("ol_dist_info", TPCCUtil.randomStr(24));
 
-                    writeBatch.put(("order_line:" + w_id + "," + d + "," + c + "," + l).getBytes(), objectToJson(orderLine));
+                    if (LOAD_TO_MEMORY)
+                        inMemoryDb.put(("order_line:" + w_id + "," + d + "," + c + "," + l), orderLine);
+                    else
+                        writeBatch.put(("order_line:" + w_id + "," + d + "," + c + "," + l).getBytes(), objectToJson(orderLine));
                     batchSize++;
 
-                    if (batchSize == BATCH_SIZE) {
+                    if (!LOAD_TO_MEMORY && batchSize == BATCH_SIZE) {
                         db.write(new WriteOptions(), writeBatch);
                         writeBatch = new WriteBatch();
                         batchSize = 0;
@@ -450,7 +509,7 @@ public class InitTPCCBenchmark {
                 }
             }
         }
-        if (batchSize > 0) {
+        if (!LOAD_TO_MEMORY && batchSize > 0) {
             db.write(new WriteOptions(), writeBatch);
         }
     }

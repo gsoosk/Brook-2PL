@@ -78,11 +78,20 @@ public class DBTransactionData {
                 ((DBWriteData) d).setVariable(writeKeys[0]);
                 ((DBWriteData) d).setValue(writeKeys[1]);
             }
+            else if (!data.getNewValueMap().equals(null) && !data.getNewValueMap().isEmpty()) {
+                ((DBWriteData) d).setMultiValue(data.getNewValueMap());
+            }
         }
         else if (d instanceof DBInsertData) {
-            ((DBInsertData) d).setNewRecord(data.getValue());
+            if (!data.getNewValueMap().equals(null) && !data.getNewValueMap().isEmpty()) {
+                ((DBInsertData) d).setNewRecordData(data.getNewValueMap());
+            }
+            else {
+                ((DBInsertData) d).setNewRecord(data.getValue());
+                ((DBInsertData) d).setRecordKeys(data.getRecordKeys());
+            }
             ((DBInsertData) d).setRecordId(data.getRecordId());
-            ((DBInsertData) d).setRecordKeys(data.getRecordKeys());
+
         }
 
 

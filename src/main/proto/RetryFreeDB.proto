@@ -33,6 +33,19 @@ message TransactionId {
   string id = 1;
 }
 
+enum LockType {
+  WRITE = 0;
+  READ = 1;
+}
+
+message LockData{
+  string transactionId = 1;
+  string type = 2;
+  string resource = 3;
+  LockType lockType = 4;
+}
+
+
 
 message Data{
   string transactionId = 1;
@@ -41,6 +54,7 @@ message Data{
   string value = 4; // <Variable, New Value> (only for write/update) | <,,,> (new record for insert)
   string recordId = 5; // optional: for insert
   string recordKeys = 6; // optional for insert via rocksdb
+  map<string, string> newValue = 7; // optional: for multi value write | insert
 }
 //
 //message Key {

@@ -14,7 +14,7 @@ public interface KeyValueRepository {
     void insert(DBTransaction tx, DBInsertData data) throws Exception;
     void remove(DBTransaction tx, DBDeleteData data) throws Exception;
     void write(DBTransaction tx, DBWriteData data) throws Exception;
-    String read(DBTransaction tx, DBData data) throws Exception;
+    Map<String, String> read(DBTransaction tx, DBData data) throws Exception;
     Integer lastId(String table) throws Exception;
     void rollback(DBTransaction tx) throws Exception;
 

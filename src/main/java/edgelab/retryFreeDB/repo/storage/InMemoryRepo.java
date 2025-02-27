@@ -1,84 +1,98 @@
 package edgelab.retryFreeDB.repo.storage;
 
-import com.fasterxml.jackson.core.JsonParser;
-import com.fasterxml.jackson.core.JsonProcessingException;
-import com.fasterxml.jackson.core.type.TypeReference;
 import com.fasterxml.jackson.databind.ObjectMapper;
 import edgelab.retryFreeDB.init.InitStoreBenchmark;
+import edgelab.retryFreeDB.init.InitTPCCBenchmark;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
 import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBDeleteData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBInsertData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBWriteData;
-import io.prometheus.client.Collector;
-import io.prometheus.client.CollectorRegistry;
-import io.prometheus.client.Gauge;
-import io.prometheus.client.exporter.HTTPServer;
-import io.prometheus.client.hotspot.DefaultExports;
 import lombok.extern.slf4j.Slf4j;
-import org.apache.commons.io.FileUtils;
+import org.jgrapht.alg.util.Pair;
 import org.rocksdb.*;
 
-import java.io.File;
-import java.io.IOException;
-import java.nio.ByteBuffer;
 import java.nio.charset.StandardCharsets;
-import java.nio.file.Files;
-import java.util.AbstractMap;
 import java.util.ArrayList;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executor;
+import java.util.concurrent.ExecutionException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
 import java.util.concurrent.TimeUnit;
 
 @Slf4j
-public class RocksDBRepo implements KeyValueRepository{
+public class InMemoryRepo implements KeyValueRepository{
 
 //    TODO: SHould implement rollback mechanism with WAL
 //    TODO: move dirty read to postgres
 
 
-//    private RocksDB rocksDB;
-    private Map<String, Map<String, String>> rocksDB = new ConcurrentHashMap<>();
+    private final Map<String, Map<String, String>> inMemoryDB;
     private static final ObjectMapper objectMapper = new ObjectMapper();
-    public RocksDBRepo(String dbDirectory) throws RocksDBException {
-        try (Options options = new Options().setCreateIfMissing(false);
-             RocksDB db = RocksDB.open(options, dbDirectory)) {
-             RocksIterator iterator = db.newIterator();
-             ExecutorService executor =  Executors.newFixedThreadPool(Runtime.getRuntime().availableProcessors());
+    public InMemoryRepo(String dbDirectory) throws RocksDBException {
+        {
+            try (Options options = new Options().setCreateIfMissing(false);
+                 RocksDB db = RocksDB.open(options, dbDirectory)) {
 
-            iterator.seekToFirst();
-            while (iterator.isValid()) {
-                byte[] keyBytes = iterator.key();
-                byte[] valueBytes = iterator.value();
-                iterator.next();
+                RocksIterator iterator = db.newIterator();
+                int numThreads = Runtime.getRuntime().availableProcessors();
+                ExecutorService executor = Executors.newFixedThreadPool(numThreads);
+                List<List<Pair<byte[], byte[]>>> partitions = new ArrayList<>();
+                for (int i = 0; i < numThreads; i++) {
+                    partitions.add(new ArrayList<>());
+                }
 
-                executor.execute(() -> {
-                    try {
-                        String key = new String(keyBytes, StandardCharsets.UTF_8);
-                        Map<String, String> value = objectMapper.readValue(valueBytes, Map.class);
-                        rocksDB.put(key, value);
-                    } catch (Exception e) {
-                        e.printStackTrace();
-                    }
-                });
+                int index = 0;
+                iterator.seekToFirst();
+                while (iterator.isValid()) {
+                    byte[] keyBytes = iterator.key();
+                    byte[] valueBytes = iterator.value();
+                    partitions.get(index % numThreads).add(new Pair<>(keyBytes, valueBytes));
+                    iterator.next();
+                    index++;
+                }
+
+                System.out.println("Have read " + index + " entries from db");
+                inMemoryDB = new ConcurrentHashMap<>(index*4/3, 0.75f, Runtime.getRuntime().availableProcessors() * 2);
+                List<Future<Void>> futures = new ArrayList<>();
+                for (List<Pair<byte[], byte[]>> partition : partitions) {
+                    futures.add(executor.submit(() -> {
+                        for (Pair<byte[], byte[]> entry : partition) {
+                            try {
+                                String key = new String(entry.getFirst(), StandardCharsets.UTF_8);
+                                Map<String, String> value = objectMapper.readValue(entry.getSecond(), Map.class);
+                                inMemoryDB.put(key, value);
+                            } catch (Exception e) {
+                                e.printStackTrace();
+                            }
+                        }
+                        return null;
+                    }));
+                }
+
+                for (Future<Void> future : futures) {
+                    future.get(); // Ensure all tasks complete
                 }
 
                 executor.shutdown();
                 executor.awaitTermination(10, TimeUnit.MINUTES);
-            } catch (InterruptedException ex) {
-            throw new RuntimeException(ex);
+            } catch (InterruptedException | ExecutionException ex) {
+                throw new RuntimeException(ex);
+            }
+//            inMemoryDB = InitTPCCBenchmark.loadToMemory(32);
         }
+        System.gc();
 
-        System.out.println("Loaded " + rocksDB.size() + " entries into HashMap");
+        System.out.println("Loaded " + inMemoryDB.size() + " entries into HashMap");
+    }
 
-
-//        DBInit(dbDirectory);
+    public int getDBSize() {
+        return inMemoryDB.size();
     }
 
 //    private void DBInit(String dbPath) throws RocksDBException {
@@ -112,19 +126,23 @@ public class RocksDBRepo implements KeyValueRepository{
         log.info("{}: insert {}:{}",tx.getTimestamp(), data.getTable(), data.getRecordId());
         String key = data.getTable() + ":" + data.getRecordId();
 
+        Map<String, String> value;
+        if (data.getNewRecordData() != null && !data.getNewRecordData().isEmpty()) {
+            value = data.getNewRecordData();
+        } else {
+            value = new HashMap<>();
+            String[] record = data.getNewRecord().split(",");
+            String[] keys = data.getRecordKeys().split(",");
 
-        Map<String, String> value = new HashMap<>();
-        String[] record = data.getNewRecord().split(",");
-        String[] keys = data.getRecordKeys().split(",");
-
-        for (int i = 0 ; i < keys.length ; i++) {
-            value.put(keys[i], record[i]);
+            for (int i = 0; i < keys.length; i++) {
+                value.put(keys[i], record[i]);
+            }
         }
 
-
-        rocksDB.put(key, value);
-        tx.appendWAL(key, null);
-
+        if (!data.getTable().equals("order_line") && !data.getTable().equals("new_order") && !data.getTable().equals("history") && !data.getTable().equals("oorder")) { // do not save orderline and neworder due to memory limit
+            inMemoryDB.put(key, value);
+            tx.appendWAL(key, null);
+        }
     }
 
     @Override
@@ -133,7 +151,7 @@ public class RocksDBRepo implements KeyValueRepository{
             log.info("{}: remove {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String key = getKey(data);
 
-            Map<String, String> initValue = rocksDB.remove(key);
+            Map<String, String> initValue = inMemoryDB.remove(key);
             if (initValue != null)
                 tx.appendWAL(key, initValue);
 
@@ -146,16 +164,21 @@ public class RocksDBRepo implements KeyValueRepository{
             String key = getKey(data);
 
             /* There is a logical lock on the key*/
-            Map<String, String> value = rocksDB.get(key);
+            Map<String, String> value = inMemoryDB.get(key);
             if (value == null)
                 throw new RocksDBException("not existed");
             tx.appendWAL(key, value);
 
-            if (!value.containsKey(data.getVariable()))
-                throw new RocksDBException("does not contain variable: " + data.getVariable());
+            if (data.getMultiValue() != null && !data.getMultiValue().isEmpty()) {
+                value.putAll(data.getMultiValue());
+            }
+            else {
+                if (!value.containsKey(data.getVariable()))
+                    throw new RocksDBException("does not contain variable: " + data.getVariable());
+                value.put(data.getVariable(), data.getValue());
+            }
 
-            value.put(data.getVariable(), data.getValue());
-            rocksDB.put(key, value);
+            inMemoryDB.put(key, value);
         } catch (RocksDBException e) {
             log.error("{}: Could not write <{},{}>",tx.getTimestamp(), data.getTable() , data.getIds());
             throw e;
@@ -176,25 +199,14 @@ public class RocksDBRepo implements KeyValueRepository{
     }
 
     @Override
-    public String read(DBTransaction tx, DBData data) throws Exception {
+    public Map<String, String> read(DBTransaction tx, DBData data) throws Exception {
         try {
             log.info("{}: get {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
             String dbKey = getKey(data);
-            Map<String, String> mapData = rocksDB.get(dbKey);
+            Map<String, String> mapData = inMemoryDB.get(dbKey);
             if (mapData == null)
                 throw new RocksDBException("not existed");
-
-
-            StringBuilder value = new StringBuilder();
-            for (String key : mapData.keySet()) {
-                value.append(key.toLowerCase()).append(":");
-                value.append(mapData.get(key));
-
-                value.append(",");
-            }
-
-            value.delete(value.length()-1, value.length());
-            return value.toString();
+            return mapData;
         } catch (RocksDBException e) {
             log.error("Could not read <{}>", getKey(data));
             throw e;
@@ -215,9 +227,9 @@ public class RocksDBRepo implements KeyValueRepository{
         for (String key:
              wal.keySet()) {
             if (wal.get(key).isPresent())
-                rocksDB.put(key, wal.get(key).get());
+                inMemoryDB.put(key, wal.get(key).get());
             else
-                rocksDB.remove(key);
+                inMemoryDB.remove(key);
         }
     }
 

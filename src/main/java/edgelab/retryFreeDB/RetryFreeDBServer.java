@@ -3,6 +3,7 @@ package edgelab.retryFreeDB;
 import edgelab.proto.Config;
 import edgelab.proto.Data;
 import edgelab.proto.Empty;
+import edgelab.proto.LockData;
 import edgelab.proto.TransactionId;
 import edgelab.proto.Result;
 import edgelab.proto.RetryFreeDBServerGrpc;
@@ -21,6 +22,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -205,6 +207,24 @@ public class RetryFreeDBServer {
             return Result.newBuilder().setStatus(false).setMessage("Could not lock").build();
         }
 
+        public Result lock(DBTransaction tx, LockData request) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not lock - tx is invalid").build();
+
+            tx.startLocking();
+
+            try {
+                repo.lock(tx,  toBeAbortedTransactions, request);
+                tx.finishLocking();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
+            } catch (Exception e) {
+                log.error(e.getMessage());
+            }
+
+            tx.finishLocking();
+            return Result.newBuilder().setStatus(false).setMessage("Could not lock").build();
+        }
+
         public Result tryLock(DBTransaction tx, Data request) {
             if (isTransactionInvalid(tx))
                 return Result.newBuilder().setStatus(false).setMessage("Could not lock - tx is invalid").build();
@@ -334,7 +354,6 @@ public class RetryFreeDBServer {
 
         private Result updateDBDataOnRepo(DBData d, DBTransaction tx) {
             try {
-                String result = "done";
                 if (d instanceof DBDeleteData)
                     repo.remove(tx, (DBDeleteData) d);
                 else if (d instanceof DBWriteData)
@@ -342,8 +361,8 @@ public class RetryFreeDBServer {
                 else if(d instanceof DBInsertData)
                     repo.insert(tx, (DBInsertData) d);
                 else
-                    result = repo.get(tx, d);
-                return Result.newBuilder().setStatus(true).setMessage(result).build();
+                    return Result.newBuilder().putAllReturns(repo.get(tx, d)).setStatus(true).setMessage("done").build();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
             }
             catch (Exception ex) {
                 tx.finishIO();
@@ -553,6 +572,12 @@ public class RetryFreeDBServer {
 
         @Override
         public void setConfig(Config config, StreamObserver<Result> responseObserver) {
+           Result result = setConfig(config);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
+        }
+
+        public Result setConfig(Config config) {
             Map<String, String> configMap = config.getValuesMap();
             try {
                 if (configMap.containsKey("mode")) {
@@ -565,15 +590,15 @@ public class RetryFreeDBServer {
                     log.info("operation thinking time is set to {}", Integer.parseInt(configMap.get("operationDelay")));
                 }
 
-                responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage("done").build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
             }
             catch (Exception e) {
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Error:" + e.getMessage()).build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(false).setMessage("Error:" + e.getMessage()).build();
             }
-
         }
+
+
+
 
 //
 //        @Override
@@ -643,65 +668,4 @@ public class RetryFreeDBServer {
 
     }
 
-    public static class RetryFreeDBServiceWrapper {
-        private final RetryFreeDBService service;
-
-        public RetryFreeDBServiceWrapper(RetryFreeDBService service) {
-            this.service = service;
-        }
-
-        // Helper to simplify StreamObserver-based calls
-        private <T> T executeWithObserver(java.util.function.Consumer<StreamObserver<T>> consumer) {
-            CompletableFuture<T> future = new CompletableFuture<>();
-            StreamObserver<T> observer = new StreamObserver<>() {
-                @Override
-                public void onNext(T value) {
-                    future.complete(value);
-                }
-
-                @Override
-                public void onError(Throwable t) {
-                    future.completeExceptionally(t);
-                }
-
-                @Override
-                public void onCompleted() {
-                    // No-op
-                }
-            };
-            consumer.accept(observer);
-            try {
-                return future.get(); // Block and wait for the response
-            } catch (Exception e) {
-                throw new RuntimeException("gRPC method call failed", e);
-            }
-        }
-
-
-
-        // Wrapper for lock
-        public Result lock(Data request) {
-            return executeWithObserver(observer -> service.lock(request, observer));
-        }
-
-
-        // Wrapper for update
-        public Result update(Data request) {
-            return executeWithObserver(observer -> service.update(request, observer));
-        }
-        // Wrapper for bambooRetireLock
-        public Result bambooRetireLock(Data request) {
-            return executeWithObserver(observer -> service.bambooRetireLock(request, observer));
-        }
-
-        // Wrapper for bambooWaitForCommit
-        public Result bambooWaitForCommit(TransactionId transactionId) {
-            return executeWithObserver(observer -> service.bambooWaitForCommit(transactionId, observer));
-        }
-
-        // Wrapper for setConfig
-        public Result setConfig(Config config) {
-            return executeWithObserver(observer -> service.setConfig(config, observer));
-        }
-    }
 }

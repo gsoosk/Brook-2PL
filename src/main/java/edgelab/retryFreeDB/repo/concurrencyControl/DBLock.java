@@ -263,6 +263,10 @@ class DBLock {
         else
             pendingLockTypes.remove(transaction);
     }
+
+    public boolean isEmpty() {
+        return retiredTransactions.isEmpty() && holdingTransactions.isEmpty() && pendingTransactions.isEmpty();
+    }
 }
 
 enum LockType {

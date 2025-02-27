@@ -34,8 +34,8 @@ public abstract class Client {
     }
     public abstract void setServerConfig(Map<String, String> serverConfig);
     public abstract boolean readItem(List<String> itemsToGet);
-    public abstract TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId);
-    public abstract TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIds, int[] supplierWarehouseIds, int[] orderQuantities);
+    public abstract TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId);
+    public abstract TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIds, int[] supplierWarehouseIds, int[] orderQuantities, String txId);
     public abstract TransactionResult addListing(String pId, String iId, double i, String txId);
     public abstract TransactionResult buyListing(String pId, String lId, String txId);
 }

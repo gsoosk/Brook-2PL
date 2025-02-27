@@ -64,6 +64,9 @@ public class Performance {
         protected Map<String, String> values;
         @Getter
         protected Long start;
+        @Setter
+        @Getter
+        private String txId = "";
         public void retry() {
             this.retried++;
         }
@@ -90,9 +93,6 @@ public class Performance {
         @Getter
         private Type type;
 
-        @Getter
-        @Setter
-        private String txId = "";
 
         public StoreServerRequest(Type type, long batchId, Map<String, String> values, Long start) {
             super(batchId, values, start);
@@ -826,10 +826,12 @@ public class Performance {
                     Float.parseFloat(tx.get("paymentAmount")),
                     tx.get("customerWarehouseId"),
                     tx.get("customerDistrictId"),
-                    tx.get("customerId"));
+                    tx.get("customerId"),
+                    request.getTxId());
             if (!result.isSuccess()) {
                 log.error("Unsuccessful TPCC Payment {}", tx);
                 stats.addWaistedTime(result.getStart());
+                request.setTxId(result.getTxId());
                 submitRetry(request, stats);
             }
         }
@@ -841,12 +843,14 @@ public class Performance {
                    request.getValues().get("allLocals"),
                    request.getArrayValues().get("itemIds"),
                    request.getArrayValues().get("supplierWarehouseIds"),
-                   request.getArrayValues().get("orderQuantities"));
+                   request.getArrayValues().get("orderQuantities"),
+                    request.getTxId());
 
             if (!result.isSuccess()) {
                 if (!request.isUserAbort()) {
                     log.error("Unsuccessful TPCC new order {},{}", request.getValues(), request.getArrayValues());
                     stats.addWaistedTime(result.getStart());
+                    request.setTxId(result.getTxId());
                     submitRetry(request, stats);
                 }
                 else {

@@ -2,8 +2,9 @@ package edgelab.retryFreeDB.clients;
 
 import edgelab.proto.Config;
 import edgelab.proto.Data;
+import edgelab.proto.LockData;
+import edgelab.proto.LockType;
 import edgelab.proto.Result;
-import edgelab.proto.TransactionId;
 import edgelab.retryFreeDB.RetryFreeDBServer;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
 import lombok.Getter;
@@ -19,8 +20,6 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.Executors;
-import java.util.concurrent.ThreadPoolExecutor;
 
 import static edgelab.retryFreeDB.RetryFreeDBConfiguration.DELETE_TYPE;
 import static edgelab.retryFreeDB.RetryFreeDBConfiguration.INSERT_TYPE;
@@ -38,14 +37,12 @@ public class StoredProcedureClient extends Client{
     private final String mode;
 
     private RetryFreeDBServer.RetryFreeDBService dbService;
-    private RetryFreeDBServer.RetryFreeDBServiceWrapper blockingStub;
 
     @Getter
     public  Map<String, Long> pidAccessed = new ConcurrentHashMap<>();
 
     public StoredProcedureClient(String postgresAddress, String postgresPort, String[] tables, String mode) throws Exception {
         this.dbService = new RetryFreeDBServer.RetryFreeDBService(postgresAddress, postgresPort, tables);
-        this.blockingStub = new RetryFreeDBServer.RetryFreeDBServiceWrapper(dbService);
         this.mode = mode;
     }
     static class Pair {
@@ -178,16 +175,16 @@ public class StoredProcedureClient extends Client{
 //        commit(tx1);
 
     }
-    public TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs,  int[] supplierWarehouseIDs, int[] orderQuantities) {
+    public TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
         switch (mode) {
             case "ww" -> {
-                return TPCC_newOrderWW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities);
+                return TPCC_newOrderWW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
             }
             case "slw" -> {
-                return TPCC_newOrderSLW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities);
+                return TPCC_newOrderSLW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
             }
             case "bamboo" -> {
-                return TPCC_newOrderBamboo(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities);
+                return TPCC_newOrderBamboo(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
             }
             default -> {
                 log.error("Does not support this mode: {}", mode);
@@ -199,11 +196,11 @@ public class StoredProcedureClient extends Client{
 
 
 
-    public TransactionResult TPCC_newOrderWW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
+    public TransactionResult TPCC_newOrderWW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId("").build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
             res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
@@ -289,10 +286,12 @@ public class StoredProcedureClient extends Client{
 //                    Update Stock
                     lock(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, WRITE_TYPE);
 
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_quantity", newStockQuantity);
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
-                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    Map<String, String> newStockValues = new HashMap<>();
+                    newStockValues.put( "s_quantity", newStockQuantity);
+                    newStockValues.put( "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
+                    newStockValues.put( "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
+                    newStockValues.put("s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, newStockValues);
                 }
 
                 getCommitResult(dbTransaction, res);
@@ -315,11 +314,11 @@ public class StoredProcedureClient extends Client{
             res.setMetrics(commitResult.getReturnsMap());
     }
 
-    public TransactionResult TPCC_newOrderBamboo(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
+    public TransactionResult TPCC_newOrderBamboo(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId("").build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
             res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
@@ -407,10 +406,12 @@ public class StoredProcedureClient extends Client{
 //                    Update Stock
                     lock(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, WRITE_TYPE);
 
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_quantity", newStockQuantity);
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
-                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    Map<String, String> newStockValues = new HashMap<>();
+                    newStockValues.put( "s_quantity", newStockQuantity);
+                    newStockValues.put( "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
+                    newStockValues.put( "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
+                    newStockValues.put("s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, newStockValues);
                 }
 
                 waitForCommit(dbTransaction);
@@ -425,11 +426,11 @@ public class StoredProcedureClient extends Client{
 
         return res;
     }
-    public TransactionResult TPCC_newOrderSLW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
+    public TransactionResult TPCC_newOrderSLW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId("").build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
             res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
@@ -535,11 +536,12 @@ public class StoredProcedureClient extends Client{
                             + "," + ol_amount + "," + ol_supply_w_id + "," + ol_quantity + "," + ol_dist_info, orderLineId);
 
 //                    Update Stock
-
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_quantity", newStockQuantity);
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
-                    write(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
-                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, "s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    Map<String, String> newStockValues = new HashMap<>();
+                    newStockValues.put( "s_quantity", newStockQuantity);
+                    newStockValues.put( "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
+                    newStockValues.put( "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
+                    newStockValues.put("s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, newStockValues);
                 }
 
                 getCommitResult(dbTransaction, res);
@@ -571,16 +573,16 @@ public class StoredProcedureClient extends Client{
     }
 
 
-    public TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
+    public TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         switch (mode) {
             case "ww" -> {
-                return TPCC_paymentWW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId);
+                return TPCC_paymentWW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
             }
             case "slw" -> {
-                return TPCC_paymentSLW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId);
+                return TPCC_paymentSLW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
             }
             case "bamboo" -> {
-                return TPCC_paymentBamboo(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId);
+                return TPCC_paymentBamboo(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
             }
             default -> {
                 log.error("Does not support this mode: {}", mode);
@@ -588,11 +590,11 @@ public class StoredProcedureClient extends Client{
             }
         }
     }
-    public TransactionResult TPCC_paymentWW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
+    public TransactionResult TPCC_paymentWW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId("").build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
             res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
@@ -655,11 +657,11 @@ public class StoredProcedureClient extends Client{
         return res;
     }
 
-    public TransactionResult TPCC_paymentBamboo(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
+    public TransactionResult TPCC_paymentBamboo(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId("").build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
             res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
@@ -724,11 +726,11 @@ public class StoredProcedureClient extends Client{
         return res;
     }
 
-    public TransactionResult TPCC_paymentSLW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
+    public TransactionResult TPCC_paymentSLW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
         try {
-            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId("").build());
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
             res.setTxId(dbTransaction.getTimestamp());
         } catch (SQLException e) {
             return res;
@@ -803,24 +805,24 @@ public class StoredProcedureClient extends Client{
     }
 
     private void updateCustomer(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, Map<String, String> customer, DBTransaction tx, String customerIdKey, String customerIdValue) throws Exception {
-        float c_balance = Float.parseFloat(customer.get("c_balance")) - paymentAmount;
-        float c_ytd_payment = Float.parseFloat(customer.get("c_ytd_payment")) + paymentAmount;
-        int c_payment_cnt = Integer.parseInt(customer.get("c_payment_cnt")) + 1;
-        write(tx, "customer", customerIdKey, customerIdValue, "c_balance", String.valueOf(c_balance));
-        write(tx, "customer", customerIdKey, customerIdValue, "c_ytd_payment", String.valueOf(c_ytd_payment));
-        write(tx, "customer", customerIdKey, customerIdValue, "c_payment_cnt", String.valueOf(c_payment_cnt));
+        Map<String, String> updateMap = new HashMap<>();
+        updateMap.put("c_balance", String.valueOf(Float.parseFloat(customer.get("c_balance")) - paymentAmount));
+        updateMap.put("c_ytd_payment", String.valueOf(Float.parseFloat(customer.get("c_ytd_payment")) + paymentAmount));
+        updateMap.put("c_payment_cnt", String.valueOf(Integer.parseInt(customer.get("c_payment_cnt")) + 1));
         if (customer.get("c_credit").equals("BC")) {
             String c_data = customerId + " " + customerDistrictId + " " + customerWarehouseId + " " + districtId + " " + warehouseId + " " + paymentAmount + " | " + customer.get("c_data");
             if (c_data.length() > 500) {
                 c_data = c_data.substring(0, 500);
             }
+            updateMap.put("c_data", c_data);
 
-            write(tx, "customer", customerIdKey, customerIdValue, "c_data", c_data);
+
         }
+        write(tx, "customer", customerIdKey, customerIdValue, updateMap);
     }
 
     public void setServerConfig(Map<String, String> config) {
-        Result result = blockingStub.setConfig(Config.newBuilder().putAllValues(config).build());
+        Result result = dbService.setConfig(Config.newBuilder().putAllValues(config).build());
         if (!result.getStatus())
             throw new RuntimeException("Could not set the server config!");
 
@@ -1175,13 +1177,7 @@ public class StoredProcedureClient extends Client{
         return result;
     }
 
-    private Result waitForCommit(String transactionId) throws Exception {
-        Result result = blockingStub.bambooWaitForCommit(TransactionId.newBuilder().setId(transactionId).build());
-        log.info("{}, waitForCommit status: {} - message: {}",transactionId, result.getStatus(), result.getMessage());
-        if (!result.getStatus())
-            throw new Exception(result.getMessage());
-        return result;
-    }
+
 
     private Result retireLock(DBTransaction tx, String tableName, String key, String value) throws Exception {
         Data lockData = Data.newBuilder()
@@ -1196,21 +1192,7 @@ public class StoredProcedureClient extends Client{
         return retireResult;
     }
 
-    private Result retireLock(String transactionId, String tableName, String key, String value) throws Exception {
-        Data lockData = Data.newBuilder()
-                .setTransactionId(transactionId)
-                .setType(WRITE_TYPE)
-                .setKey(tableName + "," + key + "," + value)
-                .build();
-        Result retireResult = blockingStub.bambooRetireLock(lockData);
-        log.info("{}, retire the lock {},{}:{} status: {} - message: {}",transactionId, tableName, key, value, retireResult.getStatus(), retireResult.getMessage());
-        if (!retireResult.getStatus())
-            throw new Exception(retireResult.getMessage());
-        return retireResult;
-    }
-    private void rollback(String transactionId) {
-        Result rollbackRes = dbService.rollBackTransaction(TransactionId.newBuilder().setId(transactionId).build());
-    }
+
 
     private void rollback(DBTransaction tx) {
         Result rollbackRes = dbService.rollBackTransaction(tx);
@@ -1646,6 +1628,19 @@ public class StoredProcedureClient extends Client{
             throw new Exception(writeResult.getMessage());
     }
 
+    private void write(DBTransaction transaction, String tableName, String key, String value, Map<String, String> newValue) throws Exception {
+        Data writeData = Data.newBuilder()
+                .setTransactionId(transaction.getTimestamp())
+                .setType(WRITE_TYPE)
+                .setKey(tableName + "," + key + "," + value)
+                .putAllNewValue(newValue)
+                .build();
+        Result writeResult = dbService.update(transaction, writeData);
+        log.info("Write to {} status: {}", tableName, writeResult.getStatus());
+        if (!writeResult.getStatus())
+            throw new Exception(writeResult.getMessage());
+    }
+
 
 
     private void delete(DBTransaction dbTransaction, String tableName, String key, String value) throws Exception {
@@ -1672,7 +1667,7 @@ public class StoredProcedureClient extends Client{
         log.info("{}: read from {} status : {}",transaction.getTimestamp(), tableName, readResult.getStatus());
         if (!readResult.getStatus())
             log.error("{}: read from {} error: {}", transaction.getTimestamp(), tableName, readResult.getMessage());
-        return readResult.getStatus() ? convertStringToMap(readResult.getMessage()) : new HashMap<>();
+        return readResult.getStatus() ? readResult.getReturnsMap() : new HashMap<>();
     }
 
 
@@ -1684,6 +1679,20 @@ public class StoredProcedureClient extends Client{
                 .setType(INSERT_TYPE)
                 .setKey(tableName)
                 .setValue(newRecord)
+                .setRecordId(recordId)
+                .build();
+        Result result = dbService.update(dbTransaction, insertData);
+        log.info("insert data with id {} into {} status : {}", recordId, tableName, result.getStatus());
+        if (!result.getStatus())
+            throw new Exception(result.getMessage());
+    }
+
+    private void insert(DBTransaction dbTransaction, String tableName, Map<String, String> newRecord, String recordId) throws Exception {
+        Data insertData = Data.newBuilder()
+                .setTransactionId(dbTransaction.getTimestamp())
+                .setType(INSERT_TYPE)
+                .setKey(tableName)
+                .putAllNewValue(newRecord)
                 .setRecordId(recordId)
                 .build();
         Result result = dbService.update(dbTransaction, insertData);
@@ -1708,14 +1717,28 @@ public class StoredProcedureClient extends Client{
     }
 
 
+//    private Result lock(DBTransaction transaction, String tableName, String key, String value, String type) throws Exception {
+//        Data lockData = Data.newBuilder()
+//                .setTransactionId(transaction.getTimestamp())
+//                .setType(type)
+//                .setKey(tableName + "," + key + "," + value)
+//                .build();
+//        Result lockResult = dbService.lock(transaction, lockData);
+//        log.info("{}, lock on {},{}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, key, value, lockResult.getStatus(), lockResult.getMessage());
+//        if (!lockResult.getStatus())
+//            throw new Exception(lockResult.getMessage());
+//        return lockResult;
+//    }
+
     private Result lock(DBTransaction transaction, String tableName, String key, String value, String type) throws Exception {
-        Data lockData = Data.newBuilder()
+        LockData lockData = LockData.newBuilder()
                 .setTransactionId(transaction.getTimestamp())
                 .setType(type)
-                .setKey(tableName + "," + key + "," + value)
+                .setResource(tableName + "," + value)
+                .setLockType(WRITE_TYPE.equals(type) ? LockType.WRITE : LockType.READ)
                 .build();
         Result lockResult = dbService.lock(transaction, lockData);
-        log.info("{}, lock on {},{}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, key, value, lockResult.getStatus(), lockResult.getMessage());
+        log.info("{}, lock on {}:{} status: {} - message: {}", transaction.getTimestamp(), tableName, value, lockResult.getStatus(), lockResult.getMessage());
         if (!lockResult.getStatus())
             throw new Exception(lockResult.getMessage());
         return lockResult;
@@ -1759,17 +1782,7 @@ public class StoredProcedureClient extends Client{
     }
 
     private Result insertLock(DBTransaction tx, String tableName, String recordId) throws Exception {
-        Data lockData = Data.newBuilder()
-                .setTransactionId(tx.getTimestamp())
-                .setType(INSERT_TYPE)
-                .setKey(tableName)
-                .setRecordId(recordId)
-                .build();
-        Result lockResult = dbService.lock(tx, lockData);
-        log.info("lock on {} for insert status: {}", tableName, lockResult.getStatus());
-        if (!lockResult.getStatus())
-            throw new Exception(lockResult.getMessage());
-        return lockResult;
+        return lock(tx, tableName, "", recordId);
     }
 
     public static Map<String, String> convertStringToMap(String str) {

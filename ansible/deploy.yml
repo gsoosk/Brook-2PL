@@ -39,6 +39,12 @@
       vars:
         jar: InitStoreBenchmark
 
+    - include_role:
+        name: build
+        tasks_from: copy_jar.yml
+      vars:
+        jar: InitTPCCBenchmark
+
 - name: Copy test files to server
   hosts:
     - servers
