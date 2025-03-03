@@ -58,7 +58,7 @@ public class InMemoryRepo implements KeyValueRepository{
                 }
 
                 System.out.println("Have read " + index + " entries from db");
-                inMemoryDB = new ConcurrentHashMap<>(index*4/3, 0.75f, Runtime.getRuntime().availableProcessors() * 2);
+                inMemoryDB = new ConcurrentHashMap<>(index*2, 0.5f, Runtime.getRuntime().availableProcessors() * 2);
                 List<Future<Void>> futures = new ArrayList<>();
                 for (List<Pair<byte[], byte[]>> partition : partitions) {
                     futures.add(executor.submit(() -> {

@@ -551,7 +551,7 @@ public class Performance {
         Collections.shuffle(allWarehouses);
 
         hotWarehouses = allWarehouses.subList(0, NUM_OF_HOT_WAREHOUSE);
-        notHotWarehouses = allWarehouses.subList(NUM_OF_HOT_WAREHOUSE, allWarehouses.size());
+        notHotWarehouses = allWarehouses;
     }
 
     private Thread runItemThread(long sendingStart, Long benchmarkTime, Integer numberOfItemsToRead, Stats stats) {
@@ -1433,6 +1433,7 @@ public class Performance {
         private int itemCount;
 
         private AtomicBoolean running;
+        private long finished;
 
         public Stats(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay) {
             init(numRecords, reportingInterval, resultFilePath, metricsFilePath, recordSize, batchSize, interval, timeout, memory, hotRecords, hotChance, threads, mode, operationDelay);
@@ -1440,6 +1441,7 @@ public class Performance {
 
         private void init(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay) {
             this.start = System.currentTimeMillis();
+            this.finished = System.currentTimeMillis();
             this.windowStart = System.currentTimeMillis();
             this.iteration = new AtomicInteger(0);
             this.sampling = (int) (numRecords / Math.min(numRecords, 50000));
@@ -1590,7 +1592,7 @@ public class Performance {
         public void printTotal() {
             if (warmup.get())
                 return;
-            long elapsed = System.currentTimeMillis() - start;
+            long elapsed = finished - start;
 
 
             double recsPerSec = 1000.0 * count.get() / (double) elapsed;
@@ -1766,6 +1768,7 @@ public class Performance {
 
         public void stopRunning() {
             this.running.set(false);
+            this.finished = System.currentTimeMillis();
         }
 
         public void addRequestType(StoreServerRequest.Type type) {

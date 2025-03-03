@@ -1,23 +1,17 @@
 package edgelab.retryFreeDB.slwGraph;
 
-import com.mxgraph.layout.hierarchical.mxHierarchicalLayout;
 import com.mxgraph.layout.mxCircleLayout;
-import com.mxgraph.layout.mxCompactTreeLayout;
 import com.mxgraph.layout.mxIGraphLayout;
-import com.mxgraph.layout.mxOrganicLayout;
-import com.mxgraph.layout.mxParallelEdgeLayout;
-import com.mxgraph.layout.mxStackLayout;
 import com.mxgraph.util.mxCellRenderer;
 import edgelab.retryFreeDB.slwGraph.nodes.LockNode;
+import edgelab.retryFreeDB.slwGraph.nodes.ReadNode;
 import edgelab.retryFreeDB.slwGraph.nodes.TXNode;
 import edgelab.retryFreeDB.slwGraph.nodes.UnlockNode;
 import edgelab.retryFreeDB.slwGraph.nodes.UpdateNode;
-import org.checkerframework.checker.units.qual.C;
+import edgelab.retryFreeDB.slwGraph.nodes.WriteNode;
 import org.jgrapht.Graph;
-import org.jgrapht.alg.cycle.CycleDetector;
 import org.jgrapht.alg.cycle.HawickJamesSimpleCycles;
 import org.jgrapht.ext.JGraphXAdapter;
-import org.jgrapht.graph.DefaultDirectedGraph;
 import org.jgrapht.graph.DefaultEdge;
 import org.jgrapht.graph.SimpleDirectedGraph;
 
@@ -27,12 +21,11 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.locks.Lock;
-import java.util.function.Supplier;
 
 public class SLWGraph {
 
@@ -40,16 +33,42 @@ public class SLWGraph {
     /*
     * Gets a transaction in forms of READ -> Write -> ...
     * */
-    public void addNewTransaction(List<UpdateNode> transaction) {
-        List<TXNode> transactionNodes = getTransactionNodes(transaction);
 
-        for (TXNode txNode : transactionNodes)
+
+    private final List<List<TXNode>> chains = new ArrayList<>();
+    public void addNewTransaction(TransactionRepresentation tx) {
+        List<UpdateNode> updateNodes = new ArrayList<>();
+        Map<String, TXNode> producedOutputs = new HashMap<>(); // output: udpatenode
+
+        for (TransactionRepresentation.Operation op : tx.getOperations()) {
+            UpdateNode node = switch (op.getType()) {
+                case READ -> new ReadNode(op.getTableName(), op.getId());
+                case WRITE -> new WriteNode(op.getTableName(), op.getId());
+                default -> throw new IllegalArgumentException("Unsupported operation type: " + op.getType());
+            };
+
+            if (producedOutputs.containsKey(op.getId())) {
+                node.addDependency(producedOutputs.get(op.getId()));
+            }
+            if (op.getOutputName() != null) {
+                producedOutputs.put(op.getOutputName(), node);
+            }
+            updateNodes.add(node);
+        }
+
+        List<TXNode> transactionNodes = getTransactionChain(updateNodes);
+        chains.add(transactionNodes);
+
+        addChainToGraph(transactionNodes);
+    }
+    private void addChainToGraph(List<TXNode> chain) {
+        for (TXNode txNode : chain)
             graph.addVertex(txNode);
 
-        for (int i = 1; i < transactionNodes.size(); i++)
-            graph.addEdge(transactionNodes.get(i-1), transactionNodes.get(i));
+        for (int i = 1; i < chain.size(); i++)
+            graph.addEdge(chain.get(i-1), chain.get(i));
 
-        addConflictEdges(transactionNodes);
+        addConflictEdges(chain);
     }
 
     private void addConflictEdges(List<TXNode> transactionNodes) {
@@ -70,18 +89,32 @@ public class SLWGraph {
         }
     }
 
-    private List<TXNode> getTransactionNodes(List<UpdateNode> transaction) {
-        Set<String> alreadyLocked = new HashSet<>();
+    private List<TXNode> getTransactionChain(List<UpdateNode> transaction) {
+        Map<String, LockNode> alreadyLocked = new HashMap<>();
 
         List<TXNode> transactionWithLocks = new ArrayList<>();
         for (UpdateNode node : transaction) {
-            if (!alreadyLocked.contains(node.getTableName())) {
-                alreadyLocked.add(node.getTableName());
-                transactionWithLocks.add(LockNode.builder().tableName(node.getTableName()).build());
+            LockNode lock;
+            //TODO: add shared lock
+            if (!alreadyLocked.containsKey(node.getTableName())) {
+                lock = LockNode.builder().tableName(node.getTableName()).ids(new HashSet<>()).build();
+                lock.addId(node.getId());
+                transactionWithLocks.add(lock);
+                alreadyLocked.put(node.getTableName(), lock);
+            } else {
+                lock = alreadyLocked.get(node.getTableName());
+                lock.addId(node.getId());
             }
+
+            Set<TXNode> dependencies = node.getDependencies();
+            for (TXNode dependency: dependencies) {
+                lock.addDependency(dependency);
+            }
+            dependencies.clear();
+
             transactionWithLocks.add(node);
         }
-        transactionWithLocks.add(UnlockNode.builder().toUnlockTables(alreadyLocked.stream().toList()).build());
+        transactionWithLocks.add(UnlockNode.builder().toUnlockTables(alreadyLocked.keySet().stream().toList()).build());
         return transactionWithLocks;
     }
 

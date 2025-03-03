@@ -1,0 +1,9 @@
+buyListing(PId, LId):
+listing = Read(Listing, LId)
+buyer = Read(Player, PId)
+item = Read(Item, listing.item)
+seller = Read(Player, listing.seller)
+Delete(Listing, LId)
+Write(Item, listing.item)
+Write(Player, PId)
+Write(Player, listing.seller)
