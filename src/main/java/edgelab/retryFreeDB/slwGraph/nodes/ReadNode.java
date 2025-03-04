@@ -9,6 +9,6 @@ public class ReadNode extends UpdateNode{
 
     @Override
     public String toString() {
-        return "Read " + tableName;
+        return "Read " + tableName + ":<" + id + ">";
     }
 }

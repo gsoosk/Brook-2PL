@@ -16,11 +16,19 @@ public class LockNode extends TXNode{
     protected String tableName;
     protected Set<String> ids = new HashSet<>();
 
+    public enum Type {
+        SHARED, EXCLUSIVE
+    }
+
+    @Setter
+    @Getter
+    protected Type type;
+
 
 
     @Override
     public String toString() {
-        return "Lock " + tableName;
+        return "Lock " + tableName + " <" + ids + "> ";
     }
 
     public void addId(String id) {

@@ -10,6 +10,6 @@ public class WriteNode extends UpdateNode{
 
     @Override
     public String toString() {
-        return "Write " + tableName;
+        return "Write " + tableName + ":<" + id + ">";
     }
 }
