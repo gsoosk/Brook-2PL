@@ -9,6 +9,8 @@ import edgelab.retryFreeDB.slwGraph.nodes.TXNode;
 import edgelab.retryFreeDB.slwGraph.nodes.UnlockNode;
 import edgelab.retryFreeDB.slwGraph.nodes.UpdateNode;
 import edgelab.retryFreeDB.slwGraph.nodes.WriteNode;
+import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 import org.jgrapht.Graph;
 import org.jgrapht.alg.cycle.HawickJamesSimpleCycles;
 import org.jgrapht.ext.JGraphXAdapter;
@@ -21,13 +23,22 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.stream.IntStream;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.CopyOnWriteArrayList;
+import java.util.concurrent.ExecutionException;
+import java.util.concurrent.ExecutorService;
+import java.util.concurrent.Executors;
+import java.util.concurrent.Future;
+import java.util.stream.Collectors;
+import java.util.stream.Stream;
 
+@Slf4j
 public class SLWGraph {
 
 
@@ -37,19 +48,21 @@ public class SLWGraph {
 
 
     private final List<List<TXNode>> chains = new ArrayList<>();
+    @Setter
+    private Map<String, Integer> population = new HashMap<>();
 
-    public int getChainsScore(List<List<TXNode>> chains) {
+    public double getChainsScore(List<List<TXNode>> chains) {
         if (chains.size() != this.chains.size())
             throw new RuntimeException("chains should be equal in size");
-        int score = 0;
+        double score = 0;
         for (int i = 0 ; i < chains.size() ; i++) {
             score += getChainContentionScore(chains.get(i)) * 10;
-            score += getDiff(chains.get(i), this.chains.get(i));
+//            score += getDiff(chains.get(i), this.chains.get(i));
         }
         return score;
     }
 
-    private int getDiff(List<TXNode> c1, List<TXNode> c2) {
+    private double getDiff(List<TXNode> c1, List<TXNode> c2) {
         int diff = 0;
         int i = 0, j = 0;
         while (i < c1.size() && j < c2.size()) {
@@ -68,18 +81,38 @@ public class SLWGraph {
             }
         }
 
-        return diff;
+        return (double) diff / c1.size();
     }
 
-    private int getChainContentionScore(List<TXNode> chain) {
-        int score  = 0;
+    private double getChainContentionScore(List<TXNode> chain) {
+        double score  = 0;
         for (int i = 0 ; i < chain.size() ; i++) {
             if (chain.get(i) instanceof LockNode ) {
-                int mult = ((LockNode) chain.get(i)).getType() == LockNode.Type.EXCLUSIVE ? 5 : 1;
-                score += ((chain.size() - i) - 1) * mult;
+                double tableContentionScore = this.population.containsKey(((LockNode) chain.get(i)).getTableName()) ? (double) 1 / this.population.get(((LockNode) chain.get(i)).getTableName()): 1;
+                double lockTypeImportance = ((LockNode) chain.get(i)).getType() == LockNode.Type.EXCLUSIVE ? 1 : 1;
+                double lockContentionPortion  = getLockContentionPortion(chain, i);
+
+                score += lockContentionPortion * lockTypeImportance * tableContentionScore;
+
             }
         }
         return score;
+    }
+
+    private double getLockContentionPortion(List<TXNode> chain, int i) {
+        int chainSize = 0;
+        int afterLock = 0;
+        for (int j = 0; j < chain.size(); j++) {
+            if (!(chain.get(j) instanceof LockNode)) {
+                chainSize++;
+                if (j > i)
+                    afterLock++;
+            }
+
+
+
+        }
+        return (double) afterLock;
     }
 
     public void addNewTransaction(TransactionRepresentation tx) {
@@ -106,7 +139,7 @@ public class SLWGraph {
         chains.add(transactionNodes);
     }
 
-    private Graph<TXNode, DefaultEdge> getGraphOfChains(List<List<TXNode>> chains) {
+    private static Graph<TXNode, DefaultEdge> getGraphOfChains(List<List<TXNode>> chains) {
         Graph<TXNode, DefaultEdge> graph = new SimpleDirectedGraph<>(DefaultEdge.class);
         for (List<TXNode> chain :
                 chains) {
@@ -114,7 +147,7 @@ public class SLWGraph {
         }
         return graph;
     }
-    private void addChainToGraph(Graph<TXNode, DefaultEdge> graph, List<TXNode> chain) {
+    private static void addChainToGraph(Graph<TXNode, DefaultEdge> graph, List<TXNode> chain) {
         for (TXNode txNode : chain)
             graph.addVertex(txNode);
 
@@ -124,7 +157,7 @@ public class SLWGraph {
         addConflictEdges(graph, chain);
     }
 
-    private void addConflictEdges(Graph<TXNode, DefaultEdge> graph, List<TXNode> transactionNodes) {
+    private static void addConflictEdges(Graph<TXNode, DefaultEdge> graph, List<TXNode> transactionNodes) {
         for(TXNode txNode: transactionNodes) {
             if (txNode instanceof LockNode) {
                 for (TXNode toCheck: graph.vertexSet()) {
@@ -188,7 +221,7 @@ public class SLWGraph {
         return doesGraphHasSLWCycle(graph);
     }
 
-    private Boolean doesGraphHasSLWCycle(Graph<TXNode, DefaultEdge> graph) {
+    private static Boolean doesGraphHasSLWCycle(Graph<TXNode, DefaultEdge> graph) {
         HawickJamesSimpleCycles <TXNode, DefaultEdge> cycleDetector = new HawickJamesSimpleCycles<>(graph);
         List<List<TXNode> > allCycles = cycleDetector.findSimpleCycles();
         for (List<TXNode> cycle :
@@ -201,39 +234,39 @@ public class SLWGraph {
 
 
     public List<List<List<TXNode>>> generateAllDeadlockFreeTransactions() {
-        List<List<List<TXNode>>> deadLockFreeTransactions = new ArrayList<>();
+        log.info("Getting all chain permutations...");
+        List<Set<List<TXNode>>> chainPermutations = this.chains.parallelStream().map(this::getAllChainPermutations).toList();
 
-        List<Set<List<TXNode>>> chainPermutations = new ArrayList<>();
-        for (List<TXNode> chain :
-                chains) {
-            chainPermutations.add(getAllChainPermutations(chain));
-        }
-
-
-        List<List<List<TXNode>>> allProducts = new ArrayList<>();
-        cartesianProduct(chainPermutations, 0, new ArrayList<>(), allProducts);
-
-        for (List<List<TXNode>> product : allProducts) {
-            Graph<TXNode, DefaultEdge> graph = getGraphOfChains(product);
-            if (!doesGraphHasSLWCycle(graph))
-                deadLockFreeTransactions.add(product);
-        }
+        log.info("Get all the chains possible from chain permutations...");
+        List<List<List<TXNode>>> deadLockFreeTransactions = cartesianProductParallel(chainPermutations);
+        log.info("Save deadlock free permutations...");
+        deadLockFreeTransactions = deadLockFreeTransactions.parallelStream().filter(chain -> {
+            Graph<TXNode, DefaultEdge> graph = getGraphOfChains(chain);
+            return !doesGraphHasSLWCycle(graph);
+        }).collect(Collectors.toList());
+//        cartesianProductGraphs(chainPermutations, 0, new ArrayList<>(), deadLockFreeTransactions);
 
         return deadLockFreeTransactions;
     }
-    private void cartesianProduct(List<Set<List<TXNode>>> lists, int index,
-                                  List<List<TXNode>> current,
-                                  List<List<List<TXNode>>> result) {
-        if (index == lists.size()) {
-            result.add(new ArrayList<>(current));
-            return;
+    public static <T> List<List<T>> cartesianProductParallel(List<Set<T>> lists) {
+        List<List<T>> result = new ArrayList<>();
+        // Start with an empty combination.
+        result.add(new ArrayList<>());
+
+        // For each list (or "pool") in the input, expand combinations in parallel.
+        for (Set<T> pool : lists) {
+            result = result.parallelStream()
+                    .flatMap(partial -> pool.parallelStream()
+                            .map(item -> {
+                                List<T> newPartial = new ArrayList<>(partial);
+                                newPartial.add(item);
+                                return newPartial;
+                            }))
+                    .collect(Collectors.toList());
         }
-        for (List<TXNode> ordering : lists.get(index)) {
-            current.add(ordering);
-            cartesianProduct(lists, index + 1, current, result);
-            current.remove(current.size() - 1);
-        }
+        return result;
     }
+
 
     public Set<List<TXNode>> getAllChainPermutations(List<TXNode> chain) {
         Set<List<TXNode>> assignments = new HashSet<>();
@@ -246,18 +279,27 @@ public class SLWGraph {
     }
 
     private List<TXNode> getMovableNodes(List<TXNode> chain) {
-        List<TXNode> lockingNodes = new ArrayList<>();
+        List<TXNode> movableNodes = new ArrayList<>();
         for (TXNode node :
                 chain) {
-            if (node instanceof LockNode || node instanceof ReadNode)
-                lockingNodes.add(node);
+            if (node instanceof LockNode)
+                movableNodes.add(node);
+            if (node instanceof ReadNode)
+                for (TXNode otherNode :
+                        chain) {
+                    if (otherNode.getDependencies().contains(node)) {
+                        movableNodes.add(node);
+                        break;
+                    }
+                }
         }
 
-        return lockingNodes;
+        return movableNodes;
     }
 
     private void backtrack(List<TXNode> current, int currentNode, List<TXNode> movableNodes, Set<List<TXNode>> assignments) throws Exception {
         // if all the locking nodes are moved somewhere earlier
+//        System.out.println(currentNode);
         if (currentNode == movableNodes.size()) {
             if (validateAssignment(current)) {
                 assignments.add(new ArrayList<>(current));
@@ -268,13 +310,15 @@ public class SLWGraph {
         for (int i = currentNode; i < movableNodes.size(); i++) {
             TXNode node = movableNodes.get(i);
             int nodePos = getNodePosition(current, node);
-            List<Integer> moves =  IntStream.range(0, nodePos+1).boxed().toList();
+//            List<Integer> moves =  IntStream.range(0, nodePos+1).boxed().toList();
+            List<Integer> moves = getNodeMoves(current, nodePos, movableNodes);
 
             for (int move : moves) {
                 backtrack(moveNodeInChain(current, nodePos, move), i+1, movableNodes, assignments);
             }
         }
     }
+
 
     private List<TXNode> moveNodeInChain(List<TXNode> current, int nodePos, int move) {
         List<TXNode> copy = new ArrayList<>(current);
@@ -296,6 +340,16 @@ public class SLWGraph {
         throw new Exception("Could not find the node in current to calcualte possible moves");
     }
 
+
+    private List<Integer> getNodeMoves(List<TXNode> current, int nodePos, List<TXNode> movableNodes) {
+        List<Integer> moves = new ArrayList<>();
+        for (int i = 0; i <= nodePos; i++) {
+            if(movableNodes.contains(current.get(i)))
+                moves.add(i);
+        }
+        return moves;
+    }
+
     private boolean validateAssignment(List<TXNode> current) {
         for (int i = 0; i < current.size(); i++) {
             if (current.get(i) instanceof LockNode || current.get(i) instanceof ReadNode) {
@@ -315,7 +369,7 @@ public class SLWGraph {
         return true;
     }
 
-    private boolean areAllNodesSameLocks(List<TXNode> cycle) {
+    private static boolean areAllNodesSameLocks(List<TXNode> cycle) {
         for (int i = 1; i < cycle.size(); i++) {
             if (!(cycle.get(i-1) instanceof LockNode))
                 return false;
@@ -365,5 +419,6 @@ public class SLWGraph {
     public void printChains() {
         printChains(chains);
     }
+
 }
 

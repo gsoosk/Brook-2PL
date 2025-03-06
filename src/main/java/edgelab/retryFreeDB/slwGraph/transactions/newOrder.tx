@@ -1,0 +1,11 @@
+TX(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId):
+C = Read(customer, warehouseId_districtId_customerId)
+W = Read(warehouse, warehouseId)
+D = Read(district, warehouseId_districtId)
+Write(district, warehouseId_districtId)
+Insert(oorder)
+Insert(new_order)
+I = Read(item, itemIDs)
+S = Read(stock, supplierWarehouseIDs_itemIDs)
+Insert(order_line)
+Write(stock, supplierWarehouseIDs_itemIDs)

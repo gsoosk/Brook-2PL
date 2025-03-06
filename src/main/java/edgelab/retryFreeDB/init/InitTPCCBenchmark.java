@@ -31,9 +31,9 @@ public class InitTPCCBenchmark {
 
     private static final int FIRST_UNPROCESSED_O_ID = 2101;
     private static final int BATCH_SIZE = 100000;
-    private static final int CONFIG_ITEM_COUNT = 100000;
-    private static final int CONFIG_CUST_PER_DISTRICT = 3000;
-    private static final int CONFIG_DIST_PER_WAREHOUSE = 10;
+    public static final int CONFIG_ITEM_COUNT = 100000;
+    public static final int CONFIG_CUST_PER_DISTRICT = 3000;
+    public static final int CONFIG_DIST_PER_WAREHOUSE = 10;
 
 
     private static Map<String, Map<String, String>> inMemoryDb = new ConcurrentHashMap<>();
