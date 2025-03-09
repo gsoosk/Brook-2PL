@@ -4,10 +4,16 @@ import edgelab.retryFreeDB.init.InitStoreBenchmark;
 import edgelab.retryFreeDB.init.InitTPCCBenchmark;
 import edgelab.retryFreeDB.slwGraph.nodes.TXNode;
 import lombok.extern.slf4j.Slf4j;
+import org.checkerframework.checker.units.qual.A;
+import org.jgrapht.Graph;
+import org.jgrapht.graph.DefaultEdge;
 
+import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
+import java.util.stream.Collectors;
+
 
 @Slf4j
 public class TXCheck {
@@ -34,17 +40,17 @@ public class TXCheck {
             "Write(district, warehouseId_districtId)\n" +
             "C = Read(customer, customerWarehouseId_customerDistrictId_customerId)\n" +
             "Write(customer, customerWarehouseId_customerDistrictId_customerId)\n" +
-            "Insert(history)";
+            "Insert(history) // commutative";
     private static String newOrder = "TX(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId):\n" +
             "C = Read(customer, warehouseId_districtId_customerId)\n" +
             "W = Read(warehouse, warehouseId)\n" +
             "D = Read(district, warehouseId_districtId)\n" +
             "Write(district, warehouseId_districtId)\n" +
-            "Insert(oorder)\n" +
-            "Insert(new_order)\n" +
+            "Insert(oorder) // self-commutative\n" +
+            "Insert(new_order) // self-commutative\n" +
             "I = Read(item, itemIDs)\n" +
             "S = Read(stock, supplierWarehouseIDs_itemIDs)\n" +
-            "Insert(order_line)\n" +
+            "Insert(order_line) // self-commutative\n" +
             "Write(stock, supplierWarehouseIDs_itemIDs)";
 
 
@@ -60,17 +66,20 @@ public class TXCheck {
             "district", InitTPCCBenchmark.CONFIG_DIST_PER_WAREHOUSE,
             "customer", InitTPCCBenchmark.CONFIG_CUST_PER_DISTRICT * InitTPCCBenchmark.CONFIG_DIST_PER_WAREHOUSE,
             "item", InitTPCCBenchmark.CONFIG_ITEM_COUNT,
-            "stock", InitTPCCBenchmark.CONFIG_ITEM_COUNT
+            "stock", InitTPCCBenchmark.CONFIG_ITEM_COUNT / 20
     );
 
     public static void main(String args[])
     {
+        List<String> toReleaseLocksTable = new ArrayList<>();
 
 //        slwGraph.setPopulation(storePopulation);
+//        toReleaseLocksTable = List.of("Item", "Player");
 //        slwGraph.addNewTransaction(TransactionParser.parseTransaction(addListing));
 //        slwGraph.addNewTransaction(TransactionParser.parseTransaction(buyListing));
-//
+
         slwGraph.setPopulation(tpccPopulation);
+        toReleaseLocksTable =  List.of("warehouse", "district");
         slwGraph.addNewTransaction(TransactionParser.parseTransaction(payment));
         slwGraph.addNewTransaction(TransactionParser.parseTransaction(newOrder));
 
@@ -82,19 +91,29 @@ public class TXCheck {
         System.out.println("------------------");
 
         List<List<List<TXNode>>> deadlockFreeTransactions =  slwGraph.generateAllDeadlockFreeTransactions();
+        List<List<List<TXNode>>> partiallyChoppedTransactions = slwGraph.getAllPartiallyChoppedTransactions(deadlockFreeTransactions, toReleaseLocksTable);
+
 
         // Sort the transaction sets based on their score in ascending order.
-        deadlockFreeTransactions.sort(Comparator.comparingDouble(slwGraph::getChainsScore));
+        partiallyChoppedTransactions.sort(Comparator.comparingDouble(slwGraph::getChainsScore));
+        partiallyChoppedTransactions = partiallyChoppedTransactions.stream().filter(SLWGraph.distinctByRepresentation()).toList();
 
-        if (!deadlockFreeTransactions.isEmpty()) {
 
-            System.out.println("There is " + deadlockFreeTransactions.size() + " possible reordered ways to have deadlock-free transactions");
 
-            for (int i = 0; i < Math.min(10, deadlockFreeTransactions.size()); i++) {
-                System.out.println("------Best Transactions After Reordering (" + i +")-----------");
-                System.out.println("Score: " + slwGraph.getChainsScore(deadlockFreeTransactions.get(i)));
-                SLWGraph.printChains(deadlockFreeTransactions.get(i));
-                System.out.println("------------------");
+        //        partiallyChoppedTransactions.sort();
+
+        if (!partiallyChoppedTransactions.isEmpty()) {
+            System.out.println("There is " + partiallyChoppedTransactions.size() + " possible reordered ways to have deadlock-free transactions");
+
+            List<List<TXNode>> best = partiallyChoppedTransactions.get(0);
+            for (String tx: SLWGraph.chainsString(best).split("\n")) {
+                System.out.println(GraphToTXConverter.convertGraphStringToTX(tx));
+            }
+
+            for (int i = 0; i < Math.min(100, partiallyChoppedTransactions.size()); i++) {
+                System.out.println("------Best Transactions After Reordering and Partially chopping(" + i +")-----------");
+                System.out.println("Score: " + slwGraph.getChainsScore(partiallyChoppedTransactions.get(i)));
+                SLWGraph.printChains(partiallyChoppedTransactions.get(i));
             }
 
         }
