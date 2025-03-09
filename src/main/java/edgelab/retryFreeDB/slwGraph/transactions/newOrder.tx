@@ -3,9 +3,9 @@ C = Read(customer, warehouseId_districtId_customerId)
 W = Read(warehouse, warehouseId)
 D = Read(district, warehouseId_districtId)
 Write(district, warehouseId_districtId)
-Insert(oorder)
-Insert(new_order)
+Insert(oorder) // self-commutative
+Insert(new_order) // self-commutative
 I = Read(item, itemIDs)
 S = Read(stock, supplierWarehouseIDs_itemIDs)
-Insert(order_line)
+Insert(order_line) // self-commutative
 Write(stock, supplierWarehouseIDs_itemIDs)

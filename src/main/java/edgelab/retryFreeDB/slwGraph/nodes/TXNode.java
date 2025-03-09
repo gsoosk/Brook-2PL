@@ -11,6 +11,8 @@ public abstract class TXNode {
     @Getter
     Set<TXNode> dependencies = new HashSet<>();
     public void addDependency(TXNode node) {
+        if (node == null)
+            return;
         dependencies.add(node);
     }
 

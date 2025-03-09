@@ -23,20 +23,15 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.ConcurrentLinkedQueue;
-import java.util.concurrent.CopyOnWriteArrayList;
-import java.util.concurrent.ExecutionException;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
+import java.util.concurrent.ConcurrentHashMap;
+import java.util.function.Function;
+import java.util.function.Predicate;
 import java.util.stream.Collectors;
-import java.util.stream.Stream;
 
 @Slf4j
 public class SLWGraph {
@@ -50,6 +45,11 @@ public class SLWGraph {
     private final List<List<TXNode>> chains = new ArrayList<>();
     @Setter
     private Map<String, Integer> population = new HashMap<>();
+
+    public static <T> Predicate<List<List<TXNode>>> distinctByRepresentation() {
+        Set<Object> seen = ConcurrentHashMap.newKeySet();
+        return t -> seen.add(chainsString(t));
+    }
 
     public double getChainsScore(List<List<TXNode>> chains) {
         if (chains.size() != this.chains.size())
@@ -88,9 +88,9 @@ public class SLWGraph {
         double score  = 0;
         for (int i = 0 ; i < chain.size() ; i++) {
             if (chain.get(i) instanceof LockNode ) {
-                double tableContentionScore = this.population.containsKey(((LockNode) chain.get(i)).getTableName()) ? (double) 1 / this.population.get(((LockNode) chain.get(i)).getTableName()): 1;
+                double tableContentionScore = getTableContentionScore(((LockNode) chain.get(i)).getTableName());
                 double lockTypeImportance = ((LockNode) chain.get(i)).getType() == LockNode.Type.EXCLUSIVE ? 1 : 1;
-                double lockContentionPortion  = getLockContentionPortion(chain, i);
+                double lockContentionPortion  = lockOperationNumbers(chain, i);
 
                 score += lockContentionPortion * lockTypeImportance * tableContentionScore;
 
@@ -99,20 +99,22 @@ public class SLWGraph {
         return score;
     }
 
-    private double getLockContentionPortion(List<TXNode> chain, int i) {
-        int chainSize = 0;
-        int afterLock = 0;
-        for (int j = 0; j < chain.size(); j++) {
-            if (!(chain.get(j) instanceof LockNode)) {
-                chainSize++;
-                if (j > i)
-                    afterLock++;
+    private double getTableContentionScore(String tableName) {
+        return this.population.containsKey(tableName) ? (double) 1 / this.population.get(tableName) : 1;
+    }
+
+    private double lockOperationNumbers(List<TXNode> chain, int i) {
+        LockNode lockNode = (LockNode) chain.get(i);
+        double afterLock = 0;
+        for (int j = i+1; j < chain.size(); j++) {
+            if (chain.get(j) instanceof UpdateNode) {
+                afterLock++;
             }
-
-
-
+            if (chain.get(j) instanceof UnlockNode && ((UnlockNode) chain.get(j)).getToUnlockTables().contains(lockNode.getTableName()))
+                break;
         }
-        return (double) afterLock;
+
+        return afterLock;
     }
 
     public void addNewTransaction(TransactionRepresentation tx) {
@@ -133,6 +135,8 @@ public class SLWGraph {
                 producedOutputs.put(op.getOutputName(), node);
             }
             updateNodes.add(node);
+            node.setCommutative(op.isCommutative());
+            node.setSelfCommutative(op.isSelfCommutative());
         }
 
         List<TXNode> transactionNodes = getTransactionChain(updateNodes);
@@ -183,35 +187,40 @@ public class SLWGraph {
         for (int i = 0 ; i < transaction.size(); i++) {
             UpdateNode node = transaction.get(i);
             LockNode lock;
-            if (!alreadyLocked.containsKey(node.getTableName())) {
-                lock = LockNode.builder().tableName(node.getTableName()).ids(new HashSet<>()).build();
-                lock.addId(node.getId());
-                transactionWithLocks.add(lock);
-                alreadyLocked.put(node.getTableName(), lock);
-            } else {
-                lock = alreadyLocked.get(node.getTableName());
-                lock.addId(node.getId());
+            if (!node.isCommutative()) {
+                if (!alreadyLocked.containsKey(node.getTableName())) {
+                    lock = LockNode.builder().tableName(node.getTableName()).ids(new HashSet<>()).build();
+                    lock.addId(node.getId());
+                    transactionWithLocks.add(lock);
+                    alreadyLocked.put(node.getTableName(), lock);
+                } else {
+                    lock = alreadyLocked.get(node.getTableName());
+                    lock.addId(node.getId());
+                }
+
+                if (lock.getType() == null)
+                    lock.setType(LockNode.Type.SHARED);
+                if (node instanceof WriteNode)
+                    lock.setType(LockNode.Type.EXCLUSIVE);
+
+                Set<TXNode> dependencies = node.getDependencies();
+                for (TXNode dependency : dependencies) {
+                    lock.addDependency(dependency);
+                }
+                dependencies.clear();
+
+                if (node instanceof ReadNode) // We can also move read nodes but not before their locks
+                    dependencies.add(lock);
+
+                lock.setSelfCommutative(node.isSelfCommutative());
             }
-
-            if (lock.getType() == null)
-                lock.setType(LockNode.Type.SHARED);
-            if (node instanceof WriteNode)
-                lock.setType(LockNode.Type.EXCLUSIVE);
-
-            Set<TXNode> dependencies = node.getDependencies();
-            for (TXNode dependency: dependencies) {
-                lock.addDependency(dependency);
-            }
-            dependencies.clear();
-
-            if (node instanceof ReadNode) // We can also move read nodes but not before their locks
-                dependencies.add(lock);
 
 
 
             transactionWithLocks.add(node);
         }
-        transactionWithLocks.add(UnlockNode.builder().toUnlockTables(alreadyLocked.keySet().stream().toList()).build());
+        List<String> toUnlockTables = alreadyLocked.keySet().stream().toList();
+        transactionWithLocks.add(UnlockNode.builder().toUnlockTables(toUnlockTables).build());
         return transactionWithLocks;
     }
 
@@ -243,7 +252,7 @@ public class SLWGraph {
         deadLockFreeTransactions = deadLockFreeTransactions.parallelStream().filter(chain -> {
             Graph<TXNode, DefaultEdge> graph = getGraphOfChains(chain);
             return !doesGraphHasSLWCycle(graph);
-        }).collect(Collectors.toList());
+        }).distinct().collect(Collectors.toList());
 //        cartesianProductGraphs(chainPermutations, 0, new ArrayList<>(), deadLockFreeTransactions);
 
         return deadLockFreeTransactions;
@@ -314,30 +323,38 @@ public class SLWGraph {
             List<Integer> moves = getNodeMoves(current, nodePos, movableNodes);
 
             for (int move : moves) {
-                backtrack(moveNodeInChain(current, nodePos, move), i+1, movableNodes, assignments);
+                backtrack(moveNodeEarlierInChain(current, nodePos, move), i+1, movableNodes, assignments);
             }
         }
     }
 
 
-    private List<TXNode> moveNodeInChain(List<TXNode> current, int nodePos, int move) {
-        List<TXNode> copy = new ArrayList<>(current);
-//        0, 1, 2, 3, 4, 5
+    private List<TXNode> moveNodeEarlierInChain(List<TXNode> current, int nodePos, int move) {
+        //        0, 1, 2, 3, 4, 5
 //        pos = 3, move 1 -> newPos = 2
         int newPos = nodePos - move;
-        TXNode node = copy.remove(nodePos);
-        copy.add(newPos, node);
+        List<TXNode> copy = new ArrayList<>(current);
+        moveNodeInChain(copy, nodePos, newPos);
         return copy;
     }
 
-    private int getNodePosition(List<TXNode> current, TXNode node) throws Exception {
+    private void moveNodeInChain(List<TXNode> chain, int nodePos, int newPos) {
+        chain.add(newPos, chain.get(nodePos));
+        if (newPos >= nodePos)
+            chain.remove(nodePos);
+        else
+            chain.remove(nodePos + 1);
+    }
+
+    private int getNodePosition(List<TXNode> current, TXNode node) {
         for (int i = 0; i < current.size(); i++) {
             if (node == current.get(i)) {
                 return i;
             }
         }
 
-        throw new Exception("Could not find the node in current to calcualte possible moves");
+//        throw new Exception("Could not find the node in current to calcualte possible moves");
+        return -1;
     }
 
 
@@ -403,22 +420,175 @@ public class SLWGraph {
         }
     }
 
-    public static void printChains(List<List<TXNode>> chains) {
+    public static String chainsString(List<List<TXNode>> chains) {
+        StringBuilder chainStr = new StringBuilder();
         for (List<TXNode> chain:
              chains) {
-            StringBuilder chainStr = new StringBuilder();
+
             for (int i = 0; i < chain.size(); i++) {
                 chainStr.append(chain.get(i));
                 if (i != chain.size() - 1)
                     chainStr.append(" -> ");
             }
-            System.out.println(chainStr);
+            chainStr.append("\n");
         }
+        return chainStr.toString();
+    }
+
+    public static void printChains(List<List<TXNode>> chains) {
+        System.out.print(chainsString(chains));
     }
 
     public void printChains() {
         printChains(chains);
     }
 
+    public List<List<TXNode>> releaseLocksEarlier(List<List<TXNode>> chains, List<String> toReleaseTables) {
+
+
+
+//        lx -> wx -> ux
+
+//        ux: dependency: last write/read x
+        List<List<TXNode>> chainsWithNewUnlock = extractUnlockNode(chains, toReleaseTables);
+        moveUnlockNodesAsEarlyAsPossible(chainsWithNewUnlock, toReleaseTables);
+        return chainsWithNewUnlock;
+//        validateSCGraph(chains);
+
+
+    }
+
+    private void moveUnlockNodesAsEarlyAsPossible(List<List<TXNode>> chains, List<String> toReleaseTables) {
+//        moves unlock one by one earlier
+//        if a lock is on the way, the lock also moves with unlock earlier
+//        (In the final SC-Graph only first node will create conflicts (C-edges))
+
+        for (List<TXNode> chain : chains) {
+            for (String table : toReleaseTables) {
+
+//                find unlock node
+                int initialNodePos = -1;
+                for (int node = chain.size() - 1; node >= 0; node--) {
+                    if (chain.get(node) instanceof UnlockNode && ((UnlockNode) chain.get(node)).getToUnlockTables().contains(table)) {
+                        initialNodePos = node;
+                        break;
+                    }
+                }
+                if (initialNodePos == -1)
+                    continue;
+
+//              move unlock node (and conflicting locking nodes on the way) until its last operation
+                int afterPos = initialNodePos + 1;
+                boolean stopMoving = false;
+                for (int i = initialNodePos - 1; i >= 0; i--) {
+//                    also move (ex locking nodes that create self-conflicts /  locking nodes that conflicts with other chains)
+                    if (chain.get(i) instanceof LockNode lockNode)
+                    {
+                        if (!lockNode.isSelfCommutative() && lockNode.getType() == LockNode.Type.EXCLUSIVE)
+                            continue;
+
+                        if (hasConflictWithOtherChains(chain, chains, lockNode))
+                            continue;
+                    }
+
+
+
+
+
+
+                    double improvement = 0;
+                    for (int j = i + 1; j < afterPos; j++) {
+                        // should stop if we reach dependecies
+                        if (chain.get(j).getDependencies().contains(chain.get(i))) {
+                            stopMoving = true;
+                            break;
+                        }
+//                        calculate improvement for the next lock to see if it worth moving
+                        if (chain.get(j) instanceof UnlockNode u && u.getToUnlockTables().size() == 1)
+                            improvement += getTableContentionScore(u.getToUnlockTables().get(0));
+                        else if(chain.get(j) instanceof LockNode l)
+                            improvement -= getTableContentionScore(l.getTableName());
+                    }
+
+                    if (stopMoving || improvement < 0)
+                        break;
+
+                    moveNodeInChain(chain, i, afterPos);
+                    afterPos -= 1;
+
+                }
+
+
+            }
+        }
+
+    }
+
+    private boolean hasConflictWithOtherChains(List<TXNode> chain, List<List<TXNode>> chains, LockNode node) {
+        for (List<TXNode> chainsToCheck :
+                chains) {
+            if (chainsToCheck.equals(chain))
+                continue;
+
+            for (TXNode toCheckNode: chainsToCheck)
+                if (toCheckNode instanceof LockNode
+                        && (((LockNode) toCheckNode).getType() == LockNode.Type.EXCLUSIVE || node.getType() == LockNode.Type.EXCLUSIVE)
+                        && ((LockNode) toCheckNode).getTableName().equals(node.getTableName()))
+                    return true;
+
+        }
+        return false;
+    }
+
+
+    private List<List<TXNode>> extractUnlockNode(List<List<TXNode>> chains, List<String> toReleaseTables) {
+        List<List<TXNode>> newChains = new ArrayList<>(chains);
+        for (int i = 0 ; i < newChains.size() ; i++) {
+            List<TXNode> chain = new ArrayList<>(newChains.get(i));
+            newChains.set(i, chain);
+
+            if (chain.isEmpty())
+                continue;
+
+            TXNode unlockNode = chain.get(chain.size() - 1);
+            if (!(unlockNode instanceof UnlockNode))
+                continue;
+
+            List<String> currentTables = new ArrayList<>(((UnlockNode) unlockNode).getToUnlockTables());
+            for (String toReleaseTable : toReleaseTables) {
+                if (currentTables.contains(toReleaseTable)) {
+                    UnlockNode newUnlockNode = UnlockNode.builder().movable(true).toUnlockTables(List.of(toReleaseTable)).build();
+                    chain.add(newUnlockNode);
+                    newUnlockNode.addDependency(getPreviousUpdate(chain, newUnlockNode));
+                    currentTables.remove(toReleaseTable);
+                }
+            }
+            if (currentTables.isEmpty()) {
+                chain.remove(unlockNode);
+            }
+            else {
+                chain.remove(unlockNode);
+                chain.add(UnlockNode.builder().movable(false).toUnlockTables(new ArrayList<>(currentTables)).build());
+//                ((UnlockNode) unlockNode).setToUnlockTables(currentTables);
+            }
+        }
+        return newChains;
+    }
+
+    private TXNode getPreviousUpdate(List<TXNode> chain, UnlockNode newUnlockNode) {
+        int unlockIndex = chain.indexOf(newUnlockNode);
+        for (int i = unlockIndex - 1; i >=0 ; i--) {
+            if (chain.get(i) instanceof UpdateNode && newUnlockNode.getToUnlockTables().contains(((UpdateNode) chain.get(i)).getTableName()))
+                return chain.get(i);
+        }
+        return null;
+    }
+
+
+    public List<List<List<TXNode>>> getAllPartiallyChoppedTransactions(List<List<List<TXNode>>> transactions, List<String> toReleaseLocksTable) {
+        log.info("Partially chopping deadlock-free permutations...");
+        return transactions.stream()
+                .map(chains -> releaseLocksEarlier(new ArrayList<>(chains), toReleaseLocksTable)).collect(Collectors.toList());
+    }
 }
 

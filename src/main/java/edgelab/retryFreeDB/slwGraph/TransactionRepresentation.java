@@ -10,6 +10,8 @@ public class TransactionRepresentation {
     @Data
     public class Operation {
         private String outputName;
+        private boolean commutative;
+        private boolean selfCommutative;
         public enum Type {
             WRITE, READ
         }

@@ -5,4 +5,4 @@ D = Read(district, warehouseId_districtId)
 Write(district, warehouseId_districtId)
 C = Read(customer, customerWarehouseId_customerDistrictId_customerId)
 Write(customer, customerWarehouseId_customerDistrictId_customerId)
-Insert(history)
+Insert(history) // commutative

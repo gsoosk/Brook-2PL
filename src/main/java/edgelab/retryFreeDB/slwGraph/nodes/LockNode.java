@@ -24,11 +24,15 @@ public class LockNode extends TXNode{
     @Getter
     protected Type type;
 
+    @Setter
+    @Getter
+    protected boolean selfCommutative = false;
+
 
 
     @Override
     public String toString() {
-        return "Lock " + tableName + " <" + ids + "> ";
+        return "Lock (" + (type == Type.SHARED ? "shared" : "exclusive") + ") " + tableName + " <" + ids + "> ";
     }
 
     public void addId(String id) {
