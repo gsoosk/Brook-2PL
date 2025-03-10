@@ -73,15 +73,15 @@ public class TXCheck {
     {
         List<String> toReleaseLocksTable = new ArrayList<>();
 
-//        slwGraph.setPopulation(storePopulation);
-//        toReleaseLocksTable = List.of("Item", "Player");
-//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(addListing));
-//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(buyListing));
+        slwGraph.setPopulation(storePopulation);
+        toReleaseLocksTable = List.of("Item", "Player");
+        slwGraph.addNewTransaction(TransactionParser.parseTransaction(addListing));
+        slwGraph.addNewTransaction(TransactionParser.parseTransaction(buyListing));
 
-        slwGraph.setPopulation(tpccPopulation);
-        toReleaseLocksTable =  List.of("warehouse", "district");
-        slwGraph.addNewTransaction(TransactionParser.parseTransaction(payment));
-        slwGraph.addNewTransaction(TransactionParser.parseTransaction(newOrder));
+//        slwGraph.setPopulation(tpccPopulation);
+//        toReleaseLocksTable =  List.of("warehouse", "district");
+//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(payment));
+//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(newOrder));
 
 
 //        graph.show();
@@ -110,7 +110,7 @@ public class TXCheck {
                 System.out.println(GraphToTXConverter.convertGraphStringToTX(tx));
             }
 
-            for (int i = 0; i < Math.min(100, partiallyChoppedTransactions.size()); i++) {
+            for (int i = 0; i < Math.min(10, partiallyChoppedTransactions.size()); i++) {
                 System.out.println("------Best Transactions After Reordering and Partially chopping(" + i +")-----------");
                 System.out.println("Score: " + slwGraph.getChainsScore(partiallyChoppedTransactions.get(i)));
                 SLWGraph.printChains(partiallyChoppedTransactions.get(i));

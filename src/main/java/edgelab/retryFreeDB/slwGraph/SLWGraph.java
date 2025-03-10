@@ -11,6 +11,7 @@ import edgelab.retryFreeDB.slwGraph.nodes.UpdateNode;
 import edgelab.retryFreeDB.slwGraph.nodes.WriteNode;
 import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
+import org.checkerframework.checker.units.qual.A;
 import org.jgrapht.Graph;
 import org.jgrapht.alg.cycle.HawickJamesSimpleCycles;
 import org.jgrapht.ext.JGraphXAdapter;
@@ -242,7 +243,10 @@ public class SLWGraph {
     }
 
 
+    private Set<String> conflictingTables = new HashSet<>();
     public List<List<List<TXNode>>> generateAllDeadlockFreeTransactions() {
+
+        updateAllConflictingTables();
         log.info("Getting all chain permutations...");
         List<Set<List<TXNode>>> chainPermutations = this.chains.parallelStream().map(this::getAllChainPermutations).toList();
 
@@ -257,6 +261,17 @@ public class SLWGraph {
 
         return deadLockFreeTransactions;
     }
+
+    private void updateAllConflictingTables() {
+        for (List<TXNode> chain : chains){
+            for (TXNode node : chain) {
+                if (node instanceof LockNode l && hasConflictWithOtherChains(chain, chains, l)) {
+                    conflictingTables.add(l.getTableName());
+                }
+            }
+        }
+    }
+
     public static <T> List<List<T>> cartesianProductParallel(List<Set<T>> lists) {
         List<List<T>> result = new ArrayList<>();
         // Start with an empty combination.
@@ -291,7 +306,7 @@ public class SLWGraph {
         List<TXNode> movableNodes = new ArrayList<>();
         for (TXNode node :
                 chain) {
-            if (node instanceof LockNode)
+            if (node instanceof LockNode l && conflictingTables.contains(l.getTableName()))
                 movableNodes.add(node);
             if (node instanceof ReadNode)
                 for (TXNode otherNode :
