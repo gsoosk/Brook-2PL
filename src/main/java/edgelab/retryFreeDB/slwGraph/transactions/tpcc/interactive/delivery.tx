@@ -1,0 +1,10 @@
+TX(warehouseId, o_carrier_id, txId):
+  For each district d in {1, …, TPCCConfig.configDistPerWhse}:
+    N = Read(new_order, warehouseId_d)         // Get the lowest new-order ID (NO_O_ID) for district d
+    if (N exists):
+        Delete(new_order, warehouseId_d, N)      // Remove the new-order record for district d
+        O = Read(openorder, warehouseId_d, N)      // Read open-order record to obtain customerId (O_C_ID)
+        Write(openorder, warehouseId_d, N)         // Update open-order: set O_CARRIER_ID to o_carrier_id
+        Write(order_line, warehouseId_d, N)        // Update all order-line records for order N: set OL_DELIVERY_D to current timestamp
+        T = Read(order_line, warehouseId_d, N)       // Read (sum) OL_AMOUNT from order-line records → total order amount
+        Write(customer, warehouseId_d_customerId)  // Update customer record: add T to C_BALANCE and increment C_DELIVERY_CNT
