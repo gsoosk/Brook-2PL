@@ -40,13 +40,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.Executors;
-import java.util.concurrent.Future;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
-import java.util.stream.Collectors;
-import java.util.stream.IntStream;
 
 import static net.sourceforge.argparse4j.impl.Arguments.store;
 import static net.sourceforge.argparse4j.impl.Arguments.append;
@@ -54,6 +51,8 @@ import static net.sourceforge.argparse4j.impl.Arguments.append;
 
 @Slf4j
 public class Performance {
+
+
 
     private abstract class ServerRequest {
         @Getter
@@ -103,7 +102,8 @@ public class Performance {
     private class TPCCServerRequest extends ServerRequest {
         enum Type {
             PAYMENT,
-            NEW_ORDER
+            NEW_ORDER,
+            ORDER_STATUS
         }
 
         @Getter
@@ -214,6 +214,9 @@ public class Performance {
     private AtomicInteger buy_or_sell = new AtomicInteger(1);
     private AtomicInteger buy_or_sell_hot = new AtomicInteger(1);
     public static final RandomGenerator random = new RandomGenerator(1234);
+
+
+    private boolean TPCC_HIGH_CONTENTION = false;
     private static List<Pair<String, String>> readHotPlayerRecords(String filePath) {
         List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
@@ -612,11 +615,31 @@ public class Performance {
 
 
 
-        if (txChance < 50) {
-            return geTPCCPaymentRandomRequest(warehouseId);
+        if (TPCC_HIGH_CONTENTION) {
+
+            if (txChance < 50) {
+                return getTPCCPaymentRandomRequest(warehouseId);
+            } else {
+                return getTPCCNewOrderRequest(warehouseId);
+            }
         }
         else {
-            return getTPCCNewOrderRequest(warehouseId);
+            if (txChance < 45) {
+                return getTPCCNewOrderRequest(warehouseId);
+            }
+            else if (txChance < 45 + 43) {
+                return getTPCCPaymentRandomRequest(warehouseId);
+            }
+//            else if (txChance < 45 + 43 + 4) {
+//
+//            }
+//            else if (txChance < 45 + 43 + 4 + 4) {
+//
+//            }
+            else {
+                return getTPCCOrderStatusRequest(warehouseId);
+            }
+
         }
     }
 
@@ -671,7 +694,7 @@ public class Performance {
         return request;
     }
 
-    private TPCCServerRequest geTPCCPaymentRandomRequest(int warehouseId) {
+    private TPCCServerRequest getTPCCPaymentRandomRequest(int warehouseId) {
         int districtId = TPCCUtil.randomNumber(1, 10, random);
         float paymentAmount = (float) (TPCCUtil.randomNumber(100, 500000, random) / 100.0);
 
@@ -704,6 +727,44 @@ public class Performance {
         long sendStartMicro = System.nanoTime() / 1000;
         return new TPCCServerRequest(TPCCServerRequest.Type.PAYMENT, txId.getAndIncrement(), values, sendStartMicro, false);
     }
+
+    private TPCCServerRequest getTPCCOrderStatusRequest(int warehouseId) {
+        // Choose a random district between 1 and 10.
+        int districtId = TPCCUtil.randomNumber(1, 10, random);
+        // 60% of the time, lookup by customer last name; 40% by customer id.
+//        However since we only have index for customer Id we just lookup by id
+        int y = TPCCUtil.randomNumber(61, 100, random);
+        Map<String, String> values;
+        boolean userAbort = false; // Order-Status is a read-only transaction
+        if (y <= 60) {
+            // Lookup by last name.
+            String customerLastName = TPCCUtil.getNonUniformRandomLastNameForRun(random);
+            values = Map.of(
+                    "warehouseId", String.valueOf(warehouseId),
+                    "districtId", String.valueOf(districtId),
+                    "customerLastName", customerLastName,
+                    "lookupType", "byName"
+            );
+        } else {
+            // Lookup by customer id.
+            int customerId = TPCCUtil.getCustomerID(random);
+            values = Map.of(
+                    "warehouseId", String.valueOf(warehouseId),
+                    "districtId", String.valueOf(districtId),
+                    "customerId", String.valueOf(customerId),
+                    "lookupType", "byId"
+            );
+        }
+        long sendStartMicro = System.nanoTime() / 1000;
+        return new TPCCServerRequest(
+                TPCCServerRequest.Type.ORDER_STATUS,
+                txId.getAndIncrement(),
+                values,
+                sendStartMicro,
+                userAbort
+        );
+    }
+
 
     /* Should be thread safe*/
     private StoreServerRequest getStoreServerRequest() {
@@ -856,6 +917,18 @@ public class Performance {
                 else {
                     log.error("User Abort TPCC new order {},{}", request.getValues(), request.getArrayValues());
                 }
+            }
+        }
+        else if (request.getType() == TPCCServerRequest.Type.ORDER_STATUS) {
+            result = ((StoredProcedureClient) client).TPCC_orderStatus(request.getValues().get("warehouseId"),
+                        request.getValues().get("districtId"),
+                        request.getValues().get("customerId"),
+                        request.getTxId());
+            if (!result.isSuccess()) {
+                log.error("Unsuccessful TPCC order status {},{}", request.getValues(), request.getArrayValues());
+                stats.addWaistedTime(result.getStart());
+                request.setTxId(result.getTxId());
+                submitRetry(request, stats);
             }
         }
 

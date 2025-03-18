@@ -6,6 +6,7 @@ import edgelab.proto.LockData;
 import edgelab.proto.LockType;
 import edgelab.proto.Result;
 import edgelab.retryFreeDB.RetryFreeDBServer;
+import edgelab.retryFreeDB.benchmark.util.TPCCUtil;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -18,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 
@@ -37,6 +39,8 @@ public class StoredProcedureClient extends Client{
     private final String mode;
 
     private RetryFreeDBServer.RetryFreeDBService dbService;
+
+    private final Random random = new Random(123);
 
     @Getter
     public  Map<String, Long> pidAccessed = new ConcurrentHashMap<>();
@@ -820,6 +824,186 @@ public class StoredProcedureClient extends Client{
         }
         write(tx, "customer", customerIdKey, customerIdValue, updateMap);
     }
+
+
+    public TransactionResult TPCC_orderStatus(String warehouseId, String districtId, String customerId, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(
+                    Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+                // Get customer
+                String customerKey = "c_w_id,c_d_id,c_id";
+                String customerValue = warehouseId + "," + districtId + "," + customerId;
+                lock(dbTransaction, "customer", customerKey, customerValue, READ_TYPE);
+                Map<String, String> customer = read(dbTransaction, "customer", customerKey, customerValue);
+                if (customer.isEmpty())
+                    throw new Exception("customer does not exist");
+
+                // Get latest open order for this customer.
+                // (Assuming an index or composite key exists on open orders by customer.)
+                String oorderKey = "o_w_id,o_d_id,o_c_id";
+                String oorderValue = warehouseId + "," + districtId + "," + customerId;
+                lock(dbTransaction, "oorder", oorderKey, oorderValue, READ_TYPE);
+                Map<String, String> order = read(dbTransaction, "oorder", oorderKey, oorderValue);
+                // If no open order exists, then simply commit.
+                if (order.isEmpty()) {
+//                    getCommitResult(dbTransaction, res);
+//                    return res;
+                    order = Map.of("o_id", String.valueOf(random.nextInt(10000))); // dummy order
+                }
+
+                // Get order lines for the retrieved order.
+                String orderId = order.get("o_id");
+                String orderLineKey = "ol_w_id,ol_d_id,ol_o_id";
+                String orderLineValue = warehouseId + "," + districtId + "," + orderId;
+                lock(dbTransaction, "order_line", orderLineKey, orderLineValue, READ_TYPE);
+                Map<String, String> orderLines = read(dbTransaction, "order_line", orderLineKey, orderLineValue);
+                // (You might aggregate or log the order-lines as needed.)
+
+                getCommitResult(dbTransaction, res);
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+
+//    public TransactionResult TPCC_deliveryWW(String warehouseId, String o_carrier_id, String txId) {
+//        TransactionResult res = new TransactionResult();
+//        DBTransaction dbTransaction = null;
+//        try {
+//            dbTransaction = dbService.getTransaction(
+//                    Data.newBuilder().setTransactionId(txId).build());
+//            res.setTxId(dbTransaction.getTimestamp());
+//        } catch (SQLException e) {
+//            return res;
+//        }
+//        // Assume there are 10 districts per warehouse.
+//        int districtCount = 10;
+//        if (dbTransaction != null) {
+//            try {
+//                for (int d = 1; d <= districtCount; d++) {
+//                    String districtId = String.valueOf(d);
+//
+//                    // Get the lowest new order id for district.
+//                    String newOrderKey = "no_w_id,no_d_id";
+//                    String newOrderValue = warehouseId + "," + districtId;
+//                    lock(dbTransaction, "new_order", newOrderKey, newOrderValue, READ_TYPE);
+//                    // Assume scanNewOrder returns the lowest order id (or empty if none)
+//                    String no_o_id = scanNewOrder(dbTransaction, warehouseId, districtId);
+//                    if (no_o_id == null) {
+//                        continue; // no new order in this district
+//                    }
+//
+//                    // Delete the new order record.
+//                    String newOrderFullKey = warehouseId + "," + districtId + "," + no_o_id;
+//                    delete(dbTransaction, "new_order", newOrderFullKey);
+//
+//                    // Get the corresponding open order to obtain customer id.
+//                    String oorderKey = "o_w_id,o_d_id,o_id";
+//                    String oorderValue = warehouseId + "," + districtId + "," + no_o_id;
+//                    lock(dbTransaction, "oorder", oorderKey, oorderValue, READ_TYPE);
+//                    Map<String, String> openOrder = read(dbTransaction, "oorder", oorderKey, oorderValue);
+//                    if (openOrder.isEmpty())
+//                        throw new Exception("open order not found for key " + oorderValue);
+//                    String customerId = openOrder.get("o_c_id");
+//
+//                    // Update open order: set the carrier id.
+//                    lock(dbTransaction, "oorder", oorderKey, oorderValue, WRITE_TYPE);
+//                    write(dbTransaction, "oorder", oorderKey, oorderValue, "o_carrier_id", o_carrier_id);
+//
+//                    // Update order lines: set delivery date to current timestamp.
+//                    String orderLineKey = "ol_w_id,ol_d_id,ol_o_id";
+//                    String orderLineValue = warehouseId + "," + districtId + "," + no_o_id;
+//                    lock(dbTransaction, "order_line", orderLineKey, orderLineValue, WRITE_TYPE);
+//                    String deliveryTimestamp = "'" + new Timestamp(System.currentTimeMillis()) + "'";
+//                    // Assume updateOrderLineDelivery updates all order_line rows for the order.
+//                    updateOrderLineDelivery(dbTransaction, orderLineValue, deliveryTimestamp);
+//
+//                    // Sum the order-line amounts (assume we can read an aggregated value).
+//                    lock(dbTransaction, "order_line", orderLineKey, orderLineValue, READ_TYPE);
+//                    Map<String, String> orderLineAgg = read(dbTransaction, "order_line", orderLineKey, orderLineValue);
+//                    // Assume the aggregated result returns "ol_total"
+//                    float ol_total = Float.parseFloat(orderLineAgg.get("ol_total"));
+//
+//                    // Update customer: add order total to balance and increment delivery count.
+//                    String customerKey = "c_w_id,c_d_id,c_id";
+//                    String customerValue = warehouseId + "," + districtId + "," + customerId;
+//                    lock(dbTransaction, "customer", customerKey, customerValue, READ_TYPE);
+//                    Map<String, String> customer = read(dbTransaction, "customer", customerKey, customerValue);
+//                    lock(dbTransaction, "customer", customerKey, customerValue, WRITE_TYPE);
+//                    float newBalance = Float.parseFloat(customer.get("c_balance")) + ol_total;
+//                    int newDeliveryCnt = Integer.parseInt(customer.get("c_delivery_cnt")) + 1;
+//                    Map<String, String> custUpdates = new HashMap<>();
+//                    custUpdates.put("c_balance", String.valueOf(newBalance));
+//                    custUpdates.put("c_delivery_cnt", String.valueOf(newDeliveryCnt));
+//                    write(dbTransaction, "customer", customerKey, customerValue, custUpdates);
+//                }
+//                getCommitResult(dbTransaction, res);
+//            } catch (Exception e) {
+//                log.error(e.getMessage());
+//                rollback(dbTransaction);
+//                return res;
+//            }
+//        }
+//        return res;
+//    }
+//
+//    public TransactionResult TPCC_stockLevelWW(String warehouseId, String districtId, String threshold, String txId) {
+//        TransactionResult res = new TransactionResult();
+//        DBTransaction dbTransaction = null;
+//        try {
+//            dbTransaction = dbService.getTransaction(
+//                    Data.newBuilder().setTransactionId(txId).build());
+//            res.setTxId(dbTransaction.getTimestamp());
+//        } catch (SQLException e) {
+//            return res;
+//        }
+//        if (dbTransaction != null) {
+//            try {
+//                // Get district to retrieve d_next_o_id
+//                String districtKey = "d_w_id,d_id";
+//                String districtValue = warehouseId + "," + districtId;
+//                lock(dbTransaction, "district", districtKey, districtValue, READ_TYPE);
+//                Map<String, String> district = read(dbTransaction, "district", districtKey, districtValue);
+//                if (district.isEmpty())
+//                    throw new Exception("district does not exist");
+//                String d_next_o_id = district.get("d_next_o_id");
+//
+//                // Calculate the lower bound for order ids (d_next_o_id - 20)
+//                int lowerOrderId = Integer.parseInt(d_next_o_id) - 20;
+//
+//                // Execute a join query on order_line and stock to count distinct stock items with quantity below the threshold.
+//                // Here we simulate this via a single read with a composite key.
+//                String joinKey = "ol_w_id,ol_d_id,ol_range,threshold";
+//                String joinValue = warehouseId + "," + districtId + "," + lowerOrderId + "," + d_next_o_id + "," + threshold;
+//                lock(dbTransaction, "order_line_stock", joinKey, joinValue, READ_TYPE);
+//                Map<String, String> stockLevelResult = read(dbTransaction, "order_line_stock", joinKey, joinValue);
+//                // Assume the result contains "stock_count"
+//                String stock_count = stockLevelResult.get("stock_count");
+//
+//                // You could log or include the stock_count in the result.
+//                getCommitResult(dbTransaction, res);
+//            } catch (Exception e) {
+//                log.error(e.getMessage());
+//                rollback(dbTransaction);
+//                return res;
+//            }
+//        }
+//        return res;
+//    }
+
+
+
 
     public void setServerConfig(Map<String, String> config) {
         Result result = dbService.setConfig(Config.newBuilder().putAllValues(config).build());

@@ -232,7 +232,6 @@ public class ConcurrencyControl {
                 log.info("previous holding transactons: {}", lock.getHoldingTransactions());
                 log.info("previous pending transactons: {}", lock.printPendingLocks());
                 log.info("previous retired transactons: {}", lock.getRetiredTransactions());
-
                 Set<DBTransaction> toCheckTransactions = new HashSet<>(lock.getHoldingTransactions());
 //                toCheckTransactions.add(lock.getPendingTransactions().getLast());
 

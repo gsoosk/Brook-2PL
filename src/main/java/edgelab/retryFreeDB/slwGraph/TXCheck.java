@@ -73,15 +73,15 @@ public class TXCheck {
     {
         List<String> toReleaseLocksTable = new ArrayList<>();
 
-        slwGraph.setPopulation(storePopulation);
-        toReleaseLocksTable = List.of("Item", "Player");
-        slwGraph.addNewTransaction(TransactionParser.parseTransaction(addListing));
-        slwGraph.addNewTransaction(TransactionParser.parseTransaction(buyListing));
+//        slwGraph.setPopulation(storePopulation);
+//        toReleaseLocksTable = List.of("Item", "Player");
+//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(addListing));
+//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(buyListing));
 
-//        slwGraph.setPopulation(tpccPopulation);
-//        toReleaseLocksTable =  List.of("warehouse", "district");
-//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(payment));
-//        slwGraph.addNewTransaction(TransactionParser.parseTransaction(newOrder));
+        slwGraph.setPopulation(tpccPopulation);
+        toReleaseLocksTable =  List.of("warehouse", "district");
+        slwGraph.addNewTransaction(TransactionParser.parseTransaction(payment));
+        slwGraph.addNewTransaction(TransactionParser.parseTransaction(newOrder));
 
 
 //        graph.show();
