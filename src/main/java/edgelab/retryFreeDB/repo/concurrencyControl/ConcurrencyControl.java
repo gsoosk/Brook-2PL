@@ -26,6 +26,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class ConcurrencyControl {
     private static final String DEADLOCK_ERROR = "40P01";
+    private static boolean SLW_ENABLE = false;
     private static boolean WOUND_WAIT_ENABLE = true;
     private static boolean BAMBOO_ENABLE = true;
     private static final boolean SHARED_LOCK_ENABLE = true;
@@ -35,20 +36,26 @@ public class ConcurrencyControl {
             case "slw" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = false;
+                ConcurrencyControl.SLW_ENABLE = true;
                 DBLock.BAMBOO_ENABLE = false;
                 DBLock.WOUND_WAIT_ENABLE = false;
+                DBLock.SLW_ENABLE = true;
             }
             case "ww" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
+                ConcurrencyControl.SLW_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = false;
                 DBLock.WOUND_WAIT_ENABLE = true;
+                DBLock.SLW_ENABLE = false;
             }
             case "bamboo" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = true;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
+                ConcurrencyControl.SLW_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = true;
                 DBLock.WOUND_WAIT_ENABLE = true;
+                DBLock.SLW_ENABLE = false;
             }
             default -> throw new Exception("This mode of 2pl is not supported by server");
         }
@@ -128,6 +135,10 @@ public class ConcurrencyControl {
             if (!lock.isHeldBefore(tx, lockType)) {
 
                 handleConflict(tx, lockType, lock, toBeAborted);
+                if(tx.isAbort()) {
+                    log.error("Transaction is aborted. Could not lock");
+                    throw new Exception("Transaction aborted. can not lock");
+                }
 
 
                 lock.addPending(tx, lockType);
@@ -141,6 +152,7 @@ public class ConcurrencyControl {
                 while (!lock.isHeldBefore(tx, lockType)) {
                     try {
                         log.info("{}: waiting for lock on {}", tx, resource);
+                        log.info("{}: previous holding transactons: {}",tx, lock.getHoldingTransactions());
                         tx.startWaiting();
                         lock.wait();
                         if (tx.isAbort()) {
@@ -323,7 +335,6 @@ public class ConcurrencyControl {
 
     private void handleConflict(DBTransaction tx, LockType lockType, DBLock lock, Set<DBTransaction> toBeAborted) {
         synchronized (lock) {
-            if (WOUND_WAIT_ENABLE) {
                 boolean hasConflict = false;
                 log.info("previous holding transactons: {}", lock.getHoldingTransactions());
                 log.info("previous pending transactons: {}", lock.printPendingLocks());
@@ -337,24 +348,40 @@ public class ConcurrencyControl {
                         hasConflict = true;
                         log.info("{}: conflict detected {}", tx, t);
                     }
-
-                    if (hasConflict && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
+                    if (!hasConflict)
+                        continue;
+                    if (WOUND_WAIT_ENABLE) {
+                        if (Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
 //                    abort transaction t
-                        toBeAborted.add(t);
-                        t.setAbort();
-                        releaseLockWithoutPromotion(t, lock, toBeAborted);
+                            toBeAborted.add(t);
+                            t.setAbort();
+                            releaseLockWithoutPromotion(t, lock, toBeAborted);
 
 
 //                    unlockAll(t);
 //                    lock.release(t);
 //                    transactionResources.get(t).remove(lock.getResource());
 
-                        log.info("{}: Wound-wait: {} aborted by {}", tx, t, tx);
-                        log.info("after holding transactons: {}", lock.getHoldingTransactions());
+                            log.info("{}: Wound-wait: {} aborted by {}", tx, t, tx);
+                            log.info("after holding transactons: {}", lock.getHoldingTransactions());
 //                        return;
+                        }
+                    } else if (SLW_ENABLE) {
+                        if (t.isInteractiveTransaction() && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) { // ww for interactive transactions
+                            toBeAborted.add(t);
+                            t.setAbort();
+                            releaseLockWithoutPromotion(t, lock, toBeAborted);
+                        }
+                        else if (t.isInteractiveTransaction() && tx.isInteractiveTransaction()) {
+                            continue;
+                        }
+                        else if (tx.isInteractiveTransaction() && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
+                            toBeAborted.add(tx);
+                            tx.setAbort();
+                            releaseLockWithoutPromotion(tx, lock, toBeAborted);
+                        }
                     }
                 }
-            }
         }
     }
 
@@ -487,6 +514,7 @@ public class ConcurrencyControl {
 
                         boolean wasHead = lock.isHeadOfRetried(tx);
 
+
                         lock.release(tx);
                         tx.removeResource(lock.getResource());
 
@@ -553,12 +581,15 @@ public class ConcurrencyControl {
             synchronized (lock) {
                 if (!lock.getHoldingTransactions().contains(tx))
                     throw new Exception("Bamboo: does not hold the lock to retire");
+
+
                 lock.retire(tx);
 
                 log.info("{}: Lock retired  on {}", tx, lock.getResource());
 
                 lock.promoteWaiters();
                 lock.notifyAll(); // Notify all waiting threads
+
             }
 
             if (keyValueRepository instanceof PostgresRepo) {

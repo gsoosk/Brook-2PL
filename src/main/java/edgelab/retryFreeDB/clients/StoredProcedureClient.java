@@ -6,7 +6,7 @@ import edgelab.proto.LockData;
 import edgelab.proto.LockType;
 import edgelab.proto.Result;
 import edgelab.retryFreeDB.RetryFreeDBServer;
-import edgelab.retryFreeDB.benchmark.util.TPCCUtil;
+import edgelab.retryFreeDB.benchmark.Performance;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -19,6 +19,7 @@ import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
@@ -485,9 +486,11 @@ public class StoredProcedureClient extends Client{
                 }
 
 //                Early Release of Locks: Unlock customer, warehouse, district
-                unlock(dbTransaction, "warehouse", "w_id", warehouseId);
-                unlock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
-                unlock(dbTransaction, "customer", customerIdKey, customerIdValue);
+                if(!Performance.INTERACTIVE) {
+                    unlock(dbTransaction, "warehouse", "w_id", warehouseId);
+                    unlock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                    unlock(dbTransaction, "customer", customerIdKey, customerIdValue);
+                }
 
 
 //              Insert OpenOrder
@@ -772,8 +775,10 @@ public class StoredProcedureClient extends Client{
 
 
 //                Early Release of Locks: Unlock warehouse and district
-                unlock(dbTransaction, "warehouse", "w_id", warehouseId);
-                unlock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                if (!Performance.INTERACTIVE) {
+                    unlock(dbTransaction, "warehouse", "w_id", warehouseId);
+                    unlock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                }
 
                 //            Get customer
                 Map<String, String> customer = read(dbTransaction, "customer", customerIdKey, customerIdValue);
@@ -823,6 +828,56 @@ public class StoredProcedureClient extends Client{
 
         }
         write(tx, "customer", customerIdKey, customerIdValue, updateMap);
+    }
+
+
+    public TransactionResult interactiveTransaction(List<List<String>> modifyLists, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(
+                    Data.newBuilder().setTransactionId(txId).setInteractiveTransaction(true).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+                for (int i = 0; i < modifyLists.size(); i++) {
+                    List<String> modifyList = modifyLists.get(i);
+                    String table = modifyList.get(0);
+                    String key = modifyList.get(1);
+                    String value = modifyList.get(2);
+
+                    lock(dbTransaction, table, key, value, READ_TYPE);
+                    Map<String, String> record = read(dbTransaction, table, key, value);
+
+                    lock(dbTransaction, table, key, value, WRITE_TYPE);
+                    write(dbTransaction, table, key, value, record);
+
+                    if (Objects.equals(mode, "bamboo") && lastWrite(i, modifyLists)) {
+                        retireLock(dbTransaction, table, key, value);
+                    }
+                }
+
+                if (mode.equals("bamboo"))
+                    waitForCommit(dbTransaction);
+                getCommitResult(dbTransaction, res);
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+
+    private boolean lastWrite(int i, List<List<String>> modifyLists) {
+        for (int j = i+1; j < modifyLists.size(); j++) {
+            if (new HashSet<String>(modifyLists.get(i)).equals(new HashSet<String>(modifyLists.get(j))))
+                return false;
+        }
+        return true;
     }
 
 
@@ -957,8 +1012,9 @@ public class StoredProcedureClient extends Client{
 //        }
 //        return res;
 //    }
-//
-//    public TransactionResult TPCC_stockLevelWW(String warehouseId, String districtId, String threshold, String txId) {
+
+//    TODO: also add stock level if needed
+//    public TransactionResult TPCC_stockLevel(String warehouseId, String districtId, String threshold, String txId) {
 //        TransactionResult res = new TransactionResult();
 //        DBTransaction dbTransaction = null;
 //        try {

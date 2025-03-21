@@ -30,6 +30,7 @@ class DBLock {
     private final Map<DBTransaction, LockType> pendingLockTypes;
 
 
+    public static boolean SLW_ENABLE = true;
     public static boolean BAMBOO_ENABLE = false;
     public static boolean WOUND_WAIT_ENABLE = false;
 
@@ -124,14 +125,17 @@ class DBLock {
 
 
             if (BAMBOO_ENABLE) {
-                for (DBTransaction tp : retiredTransactions) {
-                    if (!upgrade) // do not increase commit semaphore twice for an upgrade lock
-                        if (conflict(retiredLockTypes.get(tp), lockType)) {
+                if (!upgrade) // do not increase commit semaphore twice for an upgrade lock
+                    if (!(retiredLockTypes.containsKey(t))) // do not increase commit semaphore multiple time for itself!
+                    {
+                        for (DBTransaction tp : retiredTransactions) {
+                            if (conflict(retiredLockTypes.get(tp), lockType)) {
 
-                            log.info("commit semaphore increased for transaction {}", t);
-                            t.incCommitSemaphore();
-                            break;
-                        }
+                                log.info("commit semaphore increased for transaction {}", t);
+                                t.incCommitSemaphore();
+                                break;
+                            }
+                    }
                 }
             }
         }
@@ -182,7 +186,8 @@ class DBLock {
     public void retire(DBTransaction transaction) {
 //         TODO
         holdingTransactions.remove(transaction);
-        retiredTransactions.add(transaction);
+        if (!retiredLockTypes.containsKey(transaction))
+            retiredTransactions.add(transaction);
         retiredLockTypes.put(transaction, ownersLockType);
         if (holdingTransactions.isEmpty())
             ownersLockType = null;
@@ -216,7 +221,12 @@ class DBLock {
 
 
     public boolean isHeldBefore(DBTransaction transaction, LockType lockType) {
-        return holdingTransactions.contains(transaction) && ownersLockType == lockType;
+        if (holdingTransactions.contains(transaction))
+            if(ownersLockType == LockType.READ && ownersLockType == lockType)
+                return true;
+            else return ownersLockType == LockType.WRITE;
+
+        return false;
     }
 
     public String printPendingLocks() {
@@ -266,6 +276,10 @@ class DBLock {
 
     public boolean isEmpty() {
         return retiredTransactions.isEmpty() && holdingTransactions.isEmpty() && pendingTransactions.isEmpty();
+    }
+
+    public boolean isRetired(DBTransaction tx) {
+        return retiredTransactions.contains(tx);
     }
 }
 

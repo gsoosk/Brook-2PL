@@ -19,6 +19,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class DBTransaction {
+    private static final long DEADLOCK_TIMEOUT = 1_000_000;
     @Getter
     private String timestamp;
     @Getter
@@ -27,6 +28,10 @@ public class DBTransaction {
     @Getter
     @Setter
     private Connection connection;
+
+    @Getter
+    @Setter
+    private boolean interactiveTransaction;
 
 
     @Getter
@@ -52,6 +57,8 @@ public class DBTransaction {
     @Getter
     private long rollingBackTime;
 
+    @Getter
+    private long startTime;
     private long previousRetireStart = -1;
     private long previousWaitStart = -1;
     private long previousIOStart = -1;
@@ -83,6 +90,7 @@ public class DBTransaction {
         this.rollingBackTime = 0;
         this.WAL = new ConcurrentHashMap<>();
         this.randomPriority = Performance.random.nextLong();
+        this.startTime = System.nanoTime();
     }
 
     @Override
@@ -128,8 +136,7 @@ public class DBTransaction {
         while (!this.canCommit()) {
             if (isAbort())
                 throw new Exception("transaction already aborted");
-            Thread.sleep(1);
-
+            Thread.sleep(0, 1000);
         }
     }
 
@@ -207,4 +214,7 @@ public class DBTransaction {
         return rollBacked.get();
     }
 
+    public boolean isDeadLock() {
+        return System.nanoTime() - startTime > DEADLOCK_TIMEOUT;
+    }
 }

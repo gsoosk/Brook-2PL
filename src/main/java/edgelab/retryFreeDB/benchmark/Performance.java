@@ -77,6 +77,11 @@ public class Performance {
             this.start = start;
         }
 
+
+        @Setter
+        @Getter
+        List<List<String>> modifyList; // for interactive
+
     }
 
     private class StoreServerRequest extends ServerRequest{
@@ -103,7 +108,8 @@ public class Performance {
         enum Type {
             PAYMENT,
             NEW_ORDER,
-            ORDER_STATUS
+            ORDER_STATUS,
+            INTERACTIVE
         }
 
         @Getter
@@ -216,7 +222,9 @@ public class Performance {
     public static final RandomGenerator random = new RandomGenerator(1234);
 
 
-    private boolean TPCC_HIGH_CONTENTION = false;
+    private final boolean TPCC_HIGH_CONTENTION = true;
+    public static final boolean INTERACTIVE = true;
+    private final int INTERACTIVE_RECORD_COUNT = 5;
     private static List<Pair<String, String>> readHotPlayerRecords(String filePath) {
         List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
@@ -614,8 +622,16 @@ public class Performance {
             warehouseId = notHotWarehouses.get(random.nextInt(notHotWarehouses.size()));
 
 
-
-        if (TPCC_HIGH_CONTENTION) {
+        if (INTERACTIVE) {
+            if (txChance < 47.5) {
+                return getTPCCPaymentRandomRequest(warehouseId);
+            } else if (txChance < 95){
+                return getTPCCNewOrderRequest(warehouseId);
+            } else {
+                return getTPCCInteractiveRequest();
+            }
+        }
+        else if (TPCC_HIGH_CONTENTION) {
 
             if (txChance < 50) {
                 return getTPCCPaymentRandomRequest(warehouseId);
@@ -764,6 +780,70 @@ public class Performance {
                 userAbort
         );
     }
+
+
+    private TPCCServerRequest getTPCCInteractiveRequest() {
+        int numberOfWarehouses = notHotWarehouses.size();
+        int numberOfDistricts = numberOfWarehouses * TPCCConfig.configDistPerWhse;
+        int numberOfCustomers = 0;
+//                numberOfDistricts * TPCCConfig.configCustPerDist;
+        int numberOfItems = 0;
+//                TPCCConfig.configItemCount;
+        int totalRecords = numberOfWarehouses + numberOfDistricts + numberOfCustomers + numberOfItems;
+
+        List<List<String>> modifyLists = new ArrayList<>(); // Each inner list: <Table, Key, Value>
+
+        for (int i = 0; i < INTERACTIVE_RECORD_COUNT; i++) {
+            int r = TPCCUtil.randomNumber(1, totalRecords, random);
+            List<String> modifyEntry = new ArrayList<>();
+
+            if (r <= numberOfWarehouses) {
+                int wId = r; //
+                modifyEntry.add("warehouse");
+                modifyEntry.add("w_id");
+                modifyEntry.add(String.valueOf(wId));
+            } else if (r <= numberOfWarehouses + numberOfDistricts) {
+                int index = r - numberOfWarehouses;
+                int index0 = index - 1;
+                int wId = (index0 / TPCCConfig.configDistPerWhse) + 1;
+                int dId = (index0 % TPCCConfig.configDistPerWhse) + 1;
+                modifyEntry.add("district");
+                modifyEntry.add("d_w_id,d_id");
+                modifyEntry.add(wId + "," + dId);
+            } else if (r <= numberOfWarehouses + numberOfDistricts + numberOfCustomers) {
+                int index = r - (numberOfWarehouses + numberOfDistricts);
+                int index0 = index - 1;
+                int districtIndex = index0 / TPCCConfig.configCustPerDist;
+                int cId = (index0 % TPCCConfig.configCustPerDist) + 1;
+                int wId = (districtIndex / TPCCConfig.configDistPerWhse) + 1;
+                int dId = (districtIndex % TPCCConfig.configDistPerWhse) + 1;
+                modifyEntry.add("customer");
+                modifyEntry.add("c_w_id,c_d_id,c_id");
+                modifyEntry.add(wId + "," + dId + "," + cId);
+            } else {
+                int index = r - (numberOfWarehouses + numberOfDistricts + numberOfCustomers);
+                int iId = index;
+                modifyEntry.add("item");
+                modifyEntry.add("i_id");
+                modifyEntry.add(String.valueOf(iId));
+            }
+
+            modifyLists.add(modifyEntry);
+        }
+
+        long sendStartMicro = System.nanoTime() / 1000;
+        TPCCServerRequest request = new TPCCServerRequest(
+                TPCCServerRequest.Type.INTERACTIVE,
+                txId.getAndIncrement(),
+                new HashMap<>(),  // No scalar values for interactive transactions.
+                sendStartMicro,
+                false
+        );
+        request.setModifyList(modifyLists);
+        return request;
+    }
+
+
 
 
     /* Should be thread safe*/
@@ -926,6 +1006,16 @@ public class Performance {
                         request.getTxId());
             if (!result.isSuccess()) {
                 log.error("Unsuccessful TPCC order status {},{}", request.getValues(), request.getArrayValues());
+                stats.addWaistedTime(result.getStart());
+                request.setTxId(result.getTxId());
+                submitRetry(request, stats);
+            }
+        }
+        else if (request.getType() == TPCCServerRequest.Type.INTERACTIVE) {
+            result = ((StoredProcedureClient) client).interactiveTransaction(request.getModifyList(),
+                    request.getTxId());
+            if (!result.isSuccess()) {
+                log.error("Unsuccessful interactive tx {}", result.getTxId());
                 stats.addWaistedTime(result.getStart());
                 request.setTxId(result.getTxId());
                 submitRetry(request, stats);

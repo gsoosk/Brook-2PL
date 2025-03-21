@@ -55,6 +55,7 @@ message Data{
   string recordId = 5; // optional: for insert
   string recordKeys = 6; // optional for insert via rocksdb
   map<string, string> newValue = 7; // optional: for multi value write | insert
+  bool interactiveTransaction = 8;
 }
 //
 //message Key {

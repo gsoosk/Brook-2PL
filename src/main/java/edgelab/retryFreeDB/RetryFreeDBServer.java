@@ -25,6 +25,7 @@ import java.sql.SQLException;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -71,7 +72,9 @@ public class RetryFreeDBServer {
     @Slf4j
     public static class RetryFreeDBService extends RetryFreeDBServerGrpc.RetryFreeDBServerImplBase {
         private final ConcurrencyControl repo;
+        private String mode = "";
         ConcurrentHashMap<String, DBTransaction> transactions;
+        ConcurrentHashMap<String, DBTransaction> interactiveTransactions;
 //        Bamboo:
         Set<DBTransaction> toBeAbortedTransactions = ConcurrentHashMap.newKeySet();
         ConcurrentHashMap<String, AtomicInteger> lastIdUsed = new ConcurrentHashMap<>();
@@ -79,6 +82,7 @@ public class RetryFreeDBServer {
         public RetryFreeDBService(String postgresAddress, String postgresPort, String[] tables) throws Exception {
             repo = new ConcurrencyControl(postgresAddress, postgresPort);
             transactions = new ConcurrentHashMap<>();
+            interactiveTransactions = new ConcurrentHashMap<>();
             lastTransactionId =  new AtomicLong(0);
 
             for (String table :
@@ -86,9 +90,6 @@ public class RetryFreeDBServer {
                 lastIdUsed.put(table, new AtomicInteger(repo.lastId(table)));
             }
             log.info("Table metadata initialization finished");
-
-            ExecutorService executor = Executors.newSingleThreadExecutor();
-//            executor.submit(this::abortTransactionsThatNeedsToBeAborted);
 
         }
 
@@ -126,6 +127,11 @@ public class RetryFreeDBServer {
                 transactionId = request.getTransactionId();
 
             DBTransaction transaction = new DBTransaction(transactionId);
+            if (request.getInteractiveTransaction()) {
+                transaction.setInteractiveTransaction(true);
+                interactiveTransactions.put(transactionId, transaction);
+            }
+
             repo.initTransaction(transaction);
             transactions.put(transactionId, transaction);
 
@@ -378,7 +384,7 @@ public class RetryFreeDBServer {
 
         private void abortTransactionsThatNeedsToBeAborted() {
             while(true) {
-                if (!toBeAbortedTransactions.isEmpty()) {
+                if (!interactiveTransactions.isEmpty()) {
 //                    log.info("waiting");
 //                    try {
 //                        Thread.sleep(1);
@@ -386,11 +392,18 @@ public class RetryFreeDBServer {
 //                        throw new RuntimeException(e);
 //                    }
 //                } else {
-
-                    for (DBTransaction tx : toBeAbortedTransactions) {
+                    for (String tx : interactiveTransactions.keySet()) {
                         try {
-                            abortTransaction(tx);
-                        } catch (Exception ignored) {
+                            DBTransaction transaction = interactiveTransactions.get(tx);
+                            if (transaction.isDeadLock()) {
+                                transaction.setAbort();
+                                toBeAbortedTransactions.add(transaction);
+                                abortTransaction(transaction);
+                                interactiveTransactions.remove(tx);
+                                log.info("{}: Forced abort transaction because of deadlock", tx);
+                            }
+                        } catch (Exception e) {
+                            log.error("Could not abort interactive tx: {}", e.getMessage());
                         }
                     }
                 }
@@ -581,8 +594,13 @@ public class RetryFreeDBServer {
             Map<String, String> configMap = config.getValuesMap();
             try {
                 if (configMap.containsKey("mode")) {
+                    this.mode = configMap.get("mode");
                     ConcurrencyControl.setMode(configMap.get("mode"));
                     log.info("2pl mode is set to :{}", configMap.get("mode"));
+//                    if (Objects.equals(this.mode, "slw")) {
+////                        ExecutorService executor = Executors.newSingleThreadExecutor();
+////                        executor.submit(this::abortTransactionsThatNeedsToBeAborted);
+//                    }
                 }
 
                 if (configMap.containsKey("operationDelay")) {
