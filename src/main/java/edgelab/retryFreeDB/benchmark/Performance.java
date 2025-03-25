@@ -92,7 +92,8 @@ public class Performance {
             BUY,
             SELL,
             BUY_HOT,
-            SELL_HOT
+            SELL_HOT,
+            INTERACTIVE
         }
         @Getter
         private Type type;
@@ -848,63 +849,68 @@ public class Performance {
 
     /* Should be thread safe*/
     private StoreServerRequest getStoreServerRequest() {
-        //        TODO: Change to correct tx selection
-        int chance = random.nextInt(100); // Generates a random number between 0 (inclusive) and 100 (exclusive)
-        int currBuyOrSell = buy_or_sell.incrementAndGet();
-        if (chance < HOT_RECORD_SELECTION_CHANCE) {
-            buy_or_sell_hot.incrementAndGet();
-            if (hotListings.isEmpty() && hotPlayersAndItems.isEmpty())
-                return null;
+        int txChance = random.nextInt(100);
 
-            StoreServerRequest request = null;
-            while (request == null) {
-                if (hotListings.isEmpty())
-                    buy_or_sell_hot.set(1); // FORCE SELL
-                else if (hotPlayersAndItems.isEmpty())
-                    buy_or_sell_hot.set(2); // FORCE BUY
+        if (INTERACTIVE && txChance < 5) {
+            return getStoreInteractiveRequest();
+        }
+        else {
+            //        TODO: Change to correct tx selection
+            int chance = random.nextInt(100); // Generates a random number between 0 (inclusive) and 100 (exclusive)
+            int currBuyOrSell = buy_or_sell.incrementAndGet();
+            if (chance < HOT_RECORD_SELECTION_CHANCE) {
+                buy_or_sell_hot.incrementAndGet();
+                if (hotListings.isEmpty() && hotPlayersAndItems.isEmpty())
+                    return null;
 
-                if (buy_or_sell_hot.get() % 2 == 0) { // buy
+                StoreServerRequest request = null;
+                while (request == null) {
+                    if (hotListings.isEmpty())
+                        buy_or_sell_hot.set(1); // FORCE SELL
+                    else if (hotPlayersAndItems.isEmpty())
+                        buy_or_sell_hot.set(2); // FORCE BUY
 
-                    Pair<String, String> randomListing;
-                    try {
-                         randomListing = hotListings.remove(random.nextInt(hotListings.size()));
-                         readOnlyHotListings.remove(randomListing.getFirst());
-                    } catch (Exception e) {
-                        buy_or_sell_hot.incrementAndGet();
-                        continue;
+                    if (buy_or_sell_hot.get() % 2 == 0) { // buy
+
+                        Pair<String, String> randomListing;
+                        try {
+                            randomListing = hotListings.remove(random.nextInt(hotListings.size()));
+                            readOnlyHotListings.remove(randomListing.getFirst());
+                        } catch (Exception e) {
+                            buy_or_sell_hot.incrementAndGet();
+                            continue;
+                        }
+                        String randomPlayer = hotPlayers.get(random.nextInt(hotPlayers.size()));
+
+
+                        Map<String, String> tx = new HashMap<>();
+                        tx.put("PId", randomPlayer);
+                        tx.put("LId", randomListing.getFirst());
+                        long sendStartMicro = System.nanoTime() / 1000;
+                        request = new StoreServerRequest(StoreServerRequest.Type.BUY_HOT, txId.getAndIncrement(), tx, sendStartMicro);
+                    } else {
+                        //sell
+                        Pair<String, String> hotPlayersAndItem;
+                        try {
+                            hotPlayersAndItem = hotPlayersAndItems.remove(random.nextInt(hotPlayersAndItems.size()));
+                        } catch (Exception e) {
+                            buy_or_sell_hot.incrementAndGet();
+                            continue;
+                        }
+
+                        Map<String, String> tx = new HashMap<>();
+                        tx.put("PId", hotPlayersAndItem.getFirst());
+                        tx.put("IId", hotPlayersAndItem.getSecond());
+                        long sendStartMicro = System.nanoTime() / 1000;
+                        request = new StoreServerRequest(StoreServerRequest.Type.SELL_HOT, txId.getAndIncrement(), tx, sendStartMicro);
                     }
-                    String randomPlayer = hotPlayers.get(random.nextInt(hotPlayers.size()));
-
-
-                    Map<String, String> tx = new HashMap<>();
-                    tx.put("PId", randomPlayer);
-                    tx.put("LId", randomListing.getFirst());
-                    long sendStartMicro = System.nanoTime() / 1000;
-                    request = new StoreServerRequest(StoreServerRequest.Type.BUY_HOT, txId.getAndIncrement(), tx, sendStartMicro);
                 }
-                else {
-                    //sell
-                    Pair<String, String> hotPlayersAndItem;
-                    try {
-                        hotPlayersAndItem = hotPlayersAndItems.remove(random.nextInt(hotPlayersAndItems.size()));
-                    } catch (Exception e) {
-                        buy_or_sell_hot.incrementAndGet();
-                        continue;
-                    }
+                return request;
 
-                    Map<String, String> tx = new HashMap<>();
-                    tx.put("PId", hotPlayersAndItem.getFirst());
-                    tx.put("IId", hotPlayersAndItem.getSecond());
-                    long sendStartMicro = System.nanoTime() / 1000;
-                    request = new StoreServerRequest(StoreServerRequest.Type.SELL_HOT, txId.getAndIncrement(), tx, sendStartMicro);
-                }
-            }
-            return request;
-
-        } else {
-            Map<String, String> tx = new HashMap<>();
-            if (currBuyOrSell % 2 == 0 && currBuyOrSell > 1000) {
-                String lid, pid;
+            } else {
+                Map<String, String> tx = new HashMap<>();
+                if (currBuyOrSell % 2 == 0 && currBuyOrSell > 1000) {
+                    String lid, pid;
 //                if (nextNotHotListingID.get() >= NUM_OF_LISTINGS) {
                     Pair<String, String> listing = notHotListings.remove();
                     lid = listing.getFirst();
@@ -917,12 +923,12 @@ public class Performance {
 //                    pid = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
 //                }
 
-                alreadyBoughtListing.add(lid);
-                tx.put("PId", pid);
-                tx.put("LId", lid);
-                long sendStartMicro = System.nanoTime() / 1000;
-                return new StoreServerRequest(StoreServerRequest.Type.BUY, txId.getAndIncrement(), tx, sendStartMicro);
-            } else {
+                    alreadyBoughtListing.add(lid);
+                    tx.put("PId", pid);
+                    tx.put("LId", lid);
+                    long sendStartMicro = System.nanoTime() / 1000;
+                    return new StoreServerRequest(StoreServerRequest.Type.BUY, txId.getAndIncrement(), tx, sendStartMicro);
+                } else {
 //                nextNotHotPlayer.updateAndGet(player -> {
 //                    if (player >= NUM_OF_PLAYERS) {
 //                        nextNotHotItemIndex.updateAndGet(x -> (x + 1) % 5);
@@ -931,19 +937,46 @@ public class Performance {
 //                    return player;
 //                });
 
-                int randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
-                while (hotPlayers.contains(String.valueOf(randomPlayer)))
-                    randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
+                    int randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
+                    while (hotPlayers.contains(String.valueOf(randomPlayer)))
+                        randomPlayer = random.nextInt(initialNotHotPlayerIndex, NUM_OF_PLAYERS);
 
 
-                int randomItem = randomPlayer * 5 + random.nextInt(5);
+                    int randomItem = randomPlayer * 5 + random.nextInt(5);
 
-                tx.put("PId", String.valueOf(randomPlayer));
-                tx.put("IId", String.valueOf(randomItem));
-                long sendStartMicro = System.nanoTime() / 1000;
-                return new StoreServerRequest(StoreServerRequest.Type.SELL, txId.getAndIncrement(), tx, sendStartMicro);
+                    tx.put("PId", String.valueOf(randomPlayer));
+                    tx.put("IId", String.valueOf(randomItem));
+                    long sendStartMicro = System.nanoTime() / 1000;
+                    return new StoreServerRequest(StoreServerRequest.Type.SELL, txId.getAndIncrement(), tx, sendStartMicro);
+                }
             }
         }
+    }
+
+    private StoreServerRequest getStoreInteractiveRequest() {
+        List<String> copyHotItems = new ArrayList<>(hotItems);
+        List<List<String>> modifyLists = new ArrayList<>();
+        for (int i = 0; i < INTERACTIVE_RECORD_COUNT; i++) {
+            List<String> modifyEntry = new ArrayList<>();
+            int randomIndex = random.nextInt(copyHotItems.size());
+            modifyEntry.add("Items");
+            modifyEntry.add("IId");
+            modifyEntry.add(copyHotItems.get(randomIndex));
+            copyHotItems.remove(randomIndex);
+
+            modifyLists.add(modifyEntry);
+        }
+
+
+
+        long sendStartMicro = System.nanoTime() / 1000;
+        StoreServerRequest request = new StoreServerRequest(StoreServerRequest.Type.INTERACTIVE,
+                txId.getAndIncrement(),
+                new HashMap<>(),
+                sendStartMicro);
+        request.setModifyList(modifyLists);
+        return request;
+
     }
 
     private void executeRequestFromThreadPool(ServerRequest request, Stats stats) {
@@ -1092,6 +1125,16 @@ public class Performance {
                     hotPlayersAndItems.add(new Pair<>(request.getValues().get("PId"), request.getValues().get("IId")));
                 log.error("{}: Unsuccessful sell {}", result.getTxId(), request.getValues());
 //                request.setTxId(result.getTxId());
+                submitRetry(request, stats);
+            }
+        }
+        else if (request.getType() == StoreServerRequest.Type.INTERACTIVE) {
+            result = ((StoredProcedureClient) client).interactiveTransaction(request.getModifyList(),
+                    request.getTxId());
+            if (!result.isSuccess()) {
+                log.error("Unsuccessful interactive tx {}", result.getTxId());
+                stats.addWaistedTime(result.getStart());
+                request.setTxId(result.getTxId());
                 submitRetry(request, stats);
             }
         }

@@ -1213,8 +1213,8 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 //             Check the owner
-                if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
-                    log.info("item has a different owner! {}<>{}", item.get("iowner"), PId);
+                if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
+                    log.info("item has a different owner! {}<>{}", item.get("IOwner"), PId);
                     commit(dbTransaction);
                     return res;
                 }
@@ -1274,8 +1274,8 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 //             Check the owner
-                if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
-                    log.info("item has a different owner! {}<>{}", item.get("iowner"), PId);
+                if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
+                    log.info("item has a different owner! {}<>{}", item.get("IOwner"), PId);
                     commit(dbTransaction);
                     return res;
                 }
@@ -1344,16 +1344,16 @@ public class StoredProcedureClient extends Client{
                 }
 
                 //            Check players cash for listing
-                if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
+                if (Double.parseDouble(player.get("PCash")) < Double.parseDouble(listing.get("LPrice"))) {
                     log.info("player does not have enough cash");
                     commit(dbTransaction);
                     return res;
                 }
 
 
-//            Read from I where LIID
-                lock(dbTransaction, "Items", "IId", listing.get("liid"), READ_TYPE);
-                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("liid"));
+//            Read from I where LIId
+                lock(dbTransaction, "Items", "IId", listing.get("LIId"), READ_TYPE);
+                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("LIId"));
                 //            Check item exists
                 if (item.isEmpty()) {
                     log.info("item does not exists!");
@@ -1368,7 +1368,7 @@ public class StoredProcedureClient extends Client{
 
 
 //            R from P where ppid
-                String PPId = item.get("iowner");
+                String PPId = item.get("IOwner");
                 lock(dbTransaction, "Players", "PId", PPId, READ_TYPE);
                 Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
                 //            Check prevOwner exists
@@ -1378,29 +1378,29 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 
-//          W into I where IId = Liid SET Iowner = pid
-                lock(dbTransaction, "Items", "IId", listing.get("liid"), WRITE_TYPE);
-                write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
+//          W into I where IId = LIId SET IOwner = pid
+                lock(dbTransaction, "Items", "IId", listing.get("LIId"), WRITE_TYPE);
+                write(dbTransaction, "Items", "IId", listing.get("LIId"), "IOwner", PId);
 
 
-                retireLock(dbTransaction, "Items", "IId", listing.get("liid"));
+                retireLock(dbTransaction, "Items", "IId", listing.get("LIId"));
 
-//           W into P where Pid SET pCash = new Cash
+//           W into P where Pid SET PCash = new Cash
                 lock(dbTransaction, "Players", "PId", PId, WRITE_TYPE);
-                String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
-                write(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
+                String newCash = Double.toString(Double.parseDouble(player.get("PCash")) - Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PId, "PCash", newCash);
 
-//           W into P where Pid SET pCash = new Cash
+//           W into P where Pid SET PCash = new Cash
                 lock(dbTransaction, "Players", "PId", PPId, WRITE_TYPE);
-                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
-                write(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
+                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("PCash")) + Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PPId, "PCash", prevOwnerNewCash);
 
 
                 waitForCommit(dbTransaction);
 
 //            Unlock
                 getCommitResult(dbTransaction, res);
-                res.setMessage(listing.get("liid"));
+                res.setMessage(listing.get("LIId"));
                 return res;
             } catch (Exception e) {
                 rollback(dbTransaction);
@@ -1458,14 +1458,15 @@ public class StoredProcedureClient extends Client{
                 lock(dbTransaction, "Items", "IId", IId, READ_TYPE);
                 Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
 //             Check the owner
-                if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
-                    log.error("item has a different owner! {}<>{}", item.get("iowner"), PId);
+                if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
+                    log.error("item has a different owner! {}<>{}", item.get("IOwner"), PId);
                     commit(dbTransaction);
                     return res;
                 }
 
                 atomicLock(dbTransaction, "Players", "PId", List.of(PId));
-                unlock(dbTransaction, "Items", "IId", IId);
+                if (!Performance.INTERACTIVE)
+                    unlock(dbTransaction, "Items", "IId", IId);
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 //            Check player exists
                 if (player.isEmpty()) {
@@ -1627,16 +1628,16 @@ public class StoredProcedureClient extends Client{
                 }
 
                 //            Check players cash for listing
-                if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
+                if (Double.parseDouble(player.get("PCash")) < Double.parseDouble(listing.get("LPrice"))) {
                     log.info("player does not have enough cash");
                     commit(dbTransaction);
                     return res;
                 }
 
 
-//            Read from I where LIID
-                lock(dbTransaction, "Items", "IId", listing.get("liid"), READ_TYPE);
-                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("liid"));
+//            Read from I where LIId
+                lock(dbTransaction, "Items", "IId", listing.get("LIId"), READ_TYPE);
+                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("LIId"));
 
                 //            Check item exists
                 if (item.isEmpty()) {
@@ -1652,7 +1653,7 @@ public class StoredProcedureClient extends Client{
 
 
 //            R from P where ppid
-                String PPId = item.get("iowner");
+                String PPId = item.get("IOwner");
                 lock(dbTransaction, "Players", "PId", PPId, READ_TYPE);
 
                 Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
@@ -1663,23 +1664,23 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 
-//          W into I where IId = Liid SET Iowner = pid
-                lock(dbTransaction, "Items", "IId", listing.get("liid"), WRITE_TYPE);
-                write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
+//          W into I where IId = LIId SET IOwner = pid
+                lock(dbTransaction, "Items", "IId", listing.get("LIId"), WRITE_TYPE);
+                write(dbTransaction, "Items", "IId", listing.get("LIId"), "IOwner", PId);
 
-//           W into P where Pid SET pCash = new Cash
+//           W into P where Pid SET PCash = new Cash
                 lock(dbTransaction, "Players", "PId", PId, WRITE_TYPE);
-                String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
-                write(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
+                String newCash = Double.toString(Double.parseDouble(player.get("PCash")) - Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PId, "PCash", newCash);
 
-//           W into P where Pid SET pCash = new Cash
+//           W into P where Pid SET PCash = new Cash
                 lock(dbTransaction, "Players", "PId", PPId, WRITE_TYPE).getStatus();
-                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
-                write(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
+                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("PCash")) + Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PPId, "PCash", prevOwnerNewCash);
 
 //            Unlock
                 getCommitResult(dbTransaction, res);
-                res.setMessage(listing.get("liid"));
+                res.setMessage(listing.get("LIId"));
 
 
 //                this.pidAccessed.computeIfPresent(PId + PPId, (key, value) -> value + 1);
@@ -1724,10 +1725,10 @@ public class StoredProcedureClient extends Client{
                     return res;
                 }
 
-//            Read from I where LIID
-                lock(dbTransaction, "Items", "IId", listing.get("liid"));
+//            Read from I where LIId
+                lock(dbTransaction, "Items", "IId", listing.get("LIId"));
 
-                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("liid"));
+                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("LIId"));
 
                 //            Check item exists
                 if (item.isEmpty()) {
@@ -1737,7 +1738,7 @@ public class StoredProcedureClient extends Client{
                 }
 
 //            Lock Players where pid, ppid
-                String PPId = item.get("iowner");
+                String PPId = item.get("IOwner");
 //                if (Integer.parseInt(PPId) > Integer.parseInt(PId)) {
 //                    lock(dbTransaction, "Players", "PId", PId);
 //                    lock(dbTransaction, "Players", "PId", PPId);
@@ -1757,7 +1758,7 @@ public class StoredProcedureClient extends Client{
                 }
 
                 //            Check players cash for listing
-                if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
+                if (Double.parseDouble(player.get("PCash")) < Double.parseDouble(listing.get("LPrice"))) {
                     log.error("player does not have enough cash");
                     commit(dbTransaction);
                     return res;
@@ -1775,23 +1776,25 @@ public class StoredProcedureClient extends Client{
 
 //            Delete from L where LID
                 delete(dbTransaction, "Listings", "LId", LId);
-                unlock(dbTransaction, "Listings", "LId", LId);
+                if (!Performance.INTERACTIVE)
+                    unlock(dbTransaction, "Listings", "LId", LId);
 
-//          W into I where IId = Liid SET Iowner = pid
-                write(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
-                unlock(dbTransaction, "Items", "IId", listing.get("liid"));
+//          W into I where IId = LIId SET IOwner = pid
+                write(dbTransaction, "Items", "IId", listing.get("LIId"), "IOwner", PId);
+                if (!Performance.INTERACTIVE)
+                    unlock(dbTransaction, "Items", "IId", listing.get("LIId"));
 
 //            delay(3000);
-//           W into P where Pid SET pCash = new Cash
-                String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
-                write(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
+//           W into P where Pid SET PCash = new Cash
+                String newCash = Double.toString(Double.parseDouble(player.get("PCash")) - Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PId, "PCash", newCash);
 
-//           W into P where Pid SET pCash = new Cash
-                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
-                write(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
+//           W into P where Pid SET PCash = new Cash
+                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("PCash")) + Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PPId, "PCash", prevOwnerNewCash);
 //            Unlock
                 getCommitResult(dbTransaction, res);
-                res.setMessage(listing.get("liid"));
+                res.setMessage(listing.get("LIId"));
 
 //                this.pidAccessed.computeIfPresent(PId, (key, value) -> value + 1);
 //                this.pidAccessed.computeIfPresent(PPId, (key, value) -> value + 1);

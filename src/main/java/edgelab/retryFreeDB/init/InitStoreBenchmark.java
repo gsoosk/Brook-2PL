@@ -77,8 +77,8 @@ public class InitStoreBenchmark {
         for (int i = 0; i < NUM_OF_PLAYERS; i++) {
             String key = "Players:" + i;
             Map<String, String> player = new HashMap<>();
-            player.put("Pname", "P" + randomString(NAME_LENGTH));
-            player.put("Pcash", String.valueOf( (int) (PLAYER_CASH_MIN + (PLAYER_CASH_MAX - PLAYER_CASH_MIN) * random.nextDouble())));
+            player.put("PName", "P" + randomString(NAME_LENGTH));
+            player.put("PCash", String.valueOf( (int) (PLAYER_CASH_MIN + (PLAYER_CASH_MAX - PLAYER_CASH_MIN) * random.nextDouble())));
             db.put(key.getBytes(), objectToJson(player));
         }
         System.out.println("Players inserted.");
