@@ -1,0 +1,8 @@
+TX(warehouseId, districtId, customerKey, txId):
+  if lookup_by_name:
+    C = Read(customer, warehouseId_districtId_customerName)
+  else:
+    C = Read(customer, warehouseId_districtId_customerId)
+  O = Read(openorder, warehouseId_districtId_C.customerId)   // most recent order (largest O_ID)
+  if (O exists):
+    OL = Read(order_line, warehouseId_districtId_O.orderId)    // all order lines for that order

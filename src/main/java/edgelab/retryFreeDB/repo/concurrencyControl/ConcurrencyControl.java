@@ -2,6 +2,7 @@ package edgelab.retryFreeDB.repo.concurrencyControl;
 
 import com.google.common.base.Joiner;
 import edgelab.proto.LockData;
+import edgelab.retryFreeDB.benchmark.Performance;
 import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBDeleteData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBInsertData;
@@ -334,6 +335,9 @@ public class ConcurrencyControl {
     }
 
     private void handleConflict(DBTransaction tx, LockType lockType, DBLock lock, Set<DBTransaction> toBeAborted) {
+        if (SLW_ENABLE && !Performance.INTERACTIVE) // no need to handle conflict in slw stored procedure mode
+            return;
+
         synchronized (lock) {
                 boolean hasConflict = false;
                 log.info("previous holding transactons: {}", lock.getHoldingTransactions());

@@ -22,6 +22,7 @@ import net.sourceforge.argparse4j.inf.ArgumentParser;
 import net.sourceforge.argparse4j.inf.ArgumentParserException;
 import net.sourceforge.argparse4j.inf.MutuallyExclusiveGroup;
 import net.sourceforge.argparse4j.inf.Namespace;
+import org.checkerframework.checker.units.qual.A;
 import org.jgrapht.alg.util.Pair;
 
 import java.io.BufferedReader;
@@ -200,12 +201,14 @@ public class Performance {
     private Client client;
     private final AtomicLong txId = new AtomicLong(0);
 //    private ConcurrentLinkedQueue<Pair<String, String>> hotPlayersAndItems; // purchasable items pid,iid
-    private List<Pair<String, String>> hotPlayersAndItems = new CopyOnWriteArrayList<>();
+//    private List<Pair<String, String>> hotPlayersAndItems = new CopyOnWriteArrayList<>();
+    private ConcurrentLinkedQueue<Pair<String, String>> hotPlayersAndItems = new ConcurrentLinkedQueue<>();
     private List<String> hotPlayers = new CopyOnWriteArrayList<>();
     private final List<String> hotItems = new CopyOnWriteArrayList<>(); // for read only tx
 //    private ConcurrentLinkedQueue<Pair<String, String>> hotListings; // current listings: lid, iid
-    private List<Pair<String, String>> hotListings = new CopyOnWriteArrayList<>();
-    private final Set<String> readOnlyHotListings = ConcurrentHashMap.newKeySet();
+//    private List<Pair<String, String>> hotListings = new CopyOnWriteArrayList<>();
+    private ConcurrentLinkedQueue<Pair<String, String>> hotListings = new ConcurrentLinkedQueue<>();
+//    private final Set<String> readOnlyHotListings = ConcurrentHashMap.newKeySet();
     private final Set<String> alreadyBoughtListing = ConcurrentHashMap.newKeySet();
     private AtomicInteger nextNotHotListingID = new AtomicInteger(10);
     private static final int initialNotHotPlayerIndex = (InitStoreBenchmark.NUM_OF_PLAYERS / 10);
@@ -224,9 +227,9 @@ public class Performance {
 
 
     private final boolean TPCC_HIGH_CONTENTION = true;
-    public static final boolean INTERACTIVE = true;
+    public static final boolean INTERACTIVE = false;
     private final int INTERACTIVE_RECORD_COUNT = 5;
-    private static List<Pair<String, String>> readHotPlayerRecords(String filePath) {
+    private static ConcurrentLinkedQueue<Pair<String, String>> readHotPlayerRecords(String filePath) {
         List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
@@ -243,12 +246,12 @@ public class Performance {
         }
         Collections.shuffle(list);
 
-        return new CopyOnWriteArrayList<>(list);
+        return new ConcurrentLinkedQueue<>(list);
     }
 
 
-    private static List<Pair<String, String>> readHotListingRecords(String filePath) {
-        List<Pair<String, String>> records = new CopyOnWriteArrayList<>();
+    private static ConcurrentLinkedQueue<Pair<String, String>> readHotListingRecords(String filePath) {
+        List<Pair<String, String>> records = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
             String line;
             while ((line = reader.readLine()) != null) {
@@ -263,7 +266,9 @@ public class Performance {
         } catch (IOException e) {
             e.printStackTrace();
         }
-        return records;
+
+        Collections.shuffle(records);
+        return new ConcurrentLinkedQueue<>(records);
     }
 
     private void removeAlreadyListedRecords() {
@@ -428,7 +433,8 @@ public class Performance {
 
                     }
                     catch (Exception e) {
-                        System.out.println("ERROR IN THREAD EXECUTING: "+  e.getMessage() + e);
+                        System.out.println("ERROR IN THREAD EXECUTING: "+  e.getMessage());
+                        e.printStackTrace(System.out);
                     }
                 }
             });
@@ -540,7 +546,7 @@ public class Performance {
     private void populateHotListings() {
         for (Pair<String, String> listing: hotListings
              ) {
-            readOnlyHotListings.add(listing.getFirst());
+//            readOnlyHotListings.add(listing.getFirst());
         }
     }
 
@@ -850,7 +856,6 @@ public class Performance {
     /* Should be thread safe*/
     private StoreServerRequest getStoreServerRequest() {
         int txChance = random.nextInt(100);
-
         if (INTERACTIVE && txChance < 5) {
             return getStoreInteractiveRequest();
         }
@@ -874,8 +879,8 @@ public class Performance {
 
                         Pair<String, String> randomListing;
                         try {
-                            randomListing = hotListings.remove(random.nextInt(hotListings.size()));
-                            readOnlyHotListings.remove(randomListing.getFirst());
+                            randomListing = hotListings.remove();
+//                            readOnlyHotListings.remove(randomListing.getFirst());
                         } catch (Exception e) {
                             buy_or_sell_hot.incrementAndGet();
                             continue;
@@ -892,7 +897,7 @@ public class Performance {
                         //sell
                         Pair<String, String> hotPlayersAndItem;
                         try {
-                            hotPlayersAndItem = hotPlayersAndItems.remove(random.nextInt(hotPlayersAndItems.size()));
+                            hotPlayersAndItem = hotPlayersAndItems.remove();
                         } catch (Exception e) {
                             buy_or_sell_hot.incrementAndGet();
                             continue;
@@ -909,7 +914,7 @@ public class Performance {
 
             } else {
                 Map<String, String> tx = new HashMap<>();
-                if (currBuyOrSell % 2 == 0 && currBuyOrSell > 1000) {
+                if (currBuyOrSell % 2 == 0 && (100 - HOT_RECORD_SELECTION_CHANCE)/100 * currBuyOrSell > 1000) {
                     String lid, pid;
 //                if (nextNotHotListingID.get() >= NUM_OF_LISTINGS) {
                     Pair<String, String> listing = notHotListings.remove();
@@ -1106,7 +1111,7 @@ public class Performance {
             else {
                 stats.addWaistedTime(result.getStart());
                 if (!isGoingToRetry(request)) {
-                    readOnlyHotListings.add(request.getValues().get("LId"));
+//                    readOnlyHotListings.add(request.getValues().get("LId"));
                     hotListings.add(new Pair<>(request.getValues().get("LId"), request.getValues().get("IId")));
                 }
                 log.error("{}: Unsuccessful buy {}", result.getTxId(), request.getValues());
@@ -1117,7 +1122,7 @@ public class Performance {
         else if (request.getType() == StoreServerRequest.Type.SELL_HOT) {
             result = client.addListing(request.getValues().get("PId"), request.getValues().get("IId"), 1, request.getTxId());
             if (result.isSuccess()) {
-                readOnlyHotListings.add(result.getMessage());
+//                readOnlyHotListings.add(result.getMessage());
                 hotListings.add(new Pair<>(result.getMessage(), request.getValues().get("IId")));
             } else {
                 stats.addWaistedTime(result.getStart());

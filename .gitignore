@@ -17,6 +17,7 @@ scripts/tpcc/tpcc_config_temp.xml
 
 output.txt
 
+.venv/*
 ./.venv
 
 
