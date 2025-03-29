@@ -21,6 +21,7 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.HashMap;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
@@ -41,7 +42,6 @@ public class RetryFreeDBServer {
                 .build();
         this.port = port;
     }
-
     public static void main(String[] args) throws IOException, InterruptedException, Exception {
         int port = Integer.parseInt(args[0]);
         String postgresAddress = args[1];
@@ -53,6 +53,7 @@ public class RetryFreeDBServer {
         server.blockUntilShutdown();
     }
 
+    //WALEED: start the server
     public void start() throws IOException {
         server.start();
         log.info("Server started, listening on " + port);
@@ -66,6 +67,8 @@ public class RetryFreeDBServer {
 
 
     @Slf4j
+    //WALEED: I need to know more about RetryFreeDBServerGrpc.RetryFreeDBServerImplBase.
+    // it seems this class to initiate the scheduler (tx, tables(resources here)) then run thread pool
     public static class RetryFreeDBService extends RetryFreeDBServerGrpc.RetryFreeDBServerImplBase {
         private final ConcurrencyControl repo;
         ConcurrentHashMap<String, DBTransaction> transactions;
@@ -73,13 +76,13 @@ public class RetryFreeDBServer {
         Set<DBTransaction> toBeAbortedTransactions = ConcurrentHashMap.newKeySet();
         ConcurrentHashMap<String, AtomicInteger> lastIdUsed = new ConcurrentHashMap<>();
         private final AtomicLong lastTransactionId;
+
         public RetryFreeDBService(String postgresAddress, String postgresPort, String[] tables) throws Exception {
             repo = new ConcurrencyControl(postgresAddress, postgresPort);
             transactions = new ConcurrentHashMap<>();
             lastTransactionId =  new AtomicLong(0);
 
-            for (String table :
-                    tables) {
+            for (String table : tables) {
                 lastIdUsed.put(table, new AtomicInteger(repo.lastId(table)));
             }
             log.info("Table metadata initialization finished");
@@ -96,7 +99,7 @@ public class RetryFreeDBServer {
            responseObserver.onNext(result);
            responseObserver.onCompleted();
         }
-
+        // WHAT IS EMPTY, RESULT, and so on? proto? how to use them?
         public Result beginTransaction(Empty request) {
             try  {
                 DBTransaction transaction = getTransaction(request);
@@ -238,6 +241,10 @@ public class RetryFreeDBServer {
             DBTransaction tx = transactions.get(request.getTransactionId());
             return update(tx, request);
         }
+        public Result updateOCC(Data request) {
+            DBTransaction tx = transactions.get(request.getTransactionId());
+            return update(tx, request);
+        }
 
         public Result update(DBTransaction tx, Data request) {
 
@@ -250,7 +257,27 @@ public class RetryFreeDBServer {
             Result result;
             if (d != null) {
                 log.info("{}: update on {}", tx, request.getKey());
-                result = updateDBDataOnRepo(d, tx);
+                result = updateDBDataOnRepo (d, tx);
+            }
+            else {
+                result = Result.newBuilder().setStatus(false).setMessage("Could not deserialize data").build();
+            }
+
+            tx.finishIO();
+            return result;
+        }
+        public Result updateIC3(DBTransaction tx, Data request) {
+            // no change from the original update
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not update - tx is invalid").build();
+
+            tx.startIO();
+            DBData d = deserilizeDataToDBData(request);
+
+            Result result;
+            if (d != null) {
+                log.info("{}: update on {}", tx, request.getKey());
+                result = updateDBDataOnRepoIC3(d, tx);
             }
             else {
                 result = Result.newBuilder().setStatus(false).setMessage("Could not deserialize data").build();
@@ -271,6 +298,24 @@ public class RetryFreeDBServer {
                     repo.insert(tx, (DBInsertData) d);
                 else
                     result = repo.get(tx, d);
+                return Result.newBuilder().setStatus(true).setMessage(result).build();
+            }
+            catch (Exception ex) {
+                tx.finishIO();
+                return Result.newBuilder().setStatus(false).setMessage("Could not perform update: " + ex.getMessage()).build();
+            }
+        }
+        private Result updateDBDataOnRepoIC3(DBData d, DBTransaction tx) {
+            try {
+                String result = "done";
+                if (d instanceof DBDeleteData)
+                    repo.removeIC3(tx, (DBDeleteData) d);
+                else if (d instanceof DBWriteData)
+                    repo.updateIC3(tx, (DBWriteData) d);
+                else if(d instanceof DBInsertData)
+                    repo.insertIC3(tx, (DBInsertData) d);
+                else
+                    result = repo.getStashedValue(tx, d);
                 return Result.newBuilder().setStatus(true).setMessage(result).build();
             }
             catch (Exception ex) {
@@ -349,6 +394,34 @@ public class RetryFreeDBServer {
             DBTransaction tx = transactions.get(transactionId.getId());
             return commitTransaction(tx);
         }
+        public Result commitTransactionOCC(TransactionId transactionId) {
+            DBTransaction tx = transactions.get(transactionId.getId());
+            return commitTransactionOCC(tx);
+        }
+        public Result commitTransactionOCC(DBTransaction tx) {
+
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not commit - tx is invalid").build();
+
+            try {
+                tx.startCommitting();
+                //repo.occValidate(tx);
+                boolean isValid = repo.occValidate(tx); // Now commits internally
+
+                if (!isValid) {
+                    log.warn("{}: OCC Conflict detected, rolling back transaction.", tx);
+                    rollBackTransaction(tx);
+                    return Result.newBuilder().setStatus(false).setMessage("Transaction aborted due to OCC conflict").build();
+                }
+                tx.finishCommitting();
+                //check
+                log.warn("{}, Transaciton commited, total");
+                return Result.newBuilder().setStatus(true)
+                        .setMessage("commit").build();
+            } catch (Exception e) {
+                return Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build();
+            }
+        }
 
         public Result commitTransaction(DBTransaction tx) {
 
@@ -372,6 +445,38 @@ public class RetryFreeDBServer {
                         .putReturns("waiting_for_others_time", String.valueOf(tx.getWaitingForOthersTime()))
                         .putReturns("rolling_back_time", String.valueOf(tx.getRollingBackTime()))
                         .setMessage("released").build();
+            } catch (Exception e) {
+                return Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build();
+            }
+        }
+        public Result commitTransactionIC3(DBTransaction tx) {
+
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not commit - tx is invalid").build();
+
+            try {
+                // check if the values have changed during the execution, like OCC.
+                // I NEED TO KNOW HOW CAN I SEND ALL CHANGES? FOR CHECKING WITH OTHER CHANGES
+                if(!repo.preCommitIC3(tx))
+                    return Result.newBuilder().setStatus(false).setMessage("Could not commit - tx is invalid").build();
+                else{
+                tx.startCommitting();
+                repo.release(tx, toBeAbortedTransactions);
+                transactions.remove(tx.getTimestamp());
+                tx.finishCommitting();
+                log.warn("{}, Transaciton commited, total waiting time: {}", tx.getTimestamp(), tx.getWaitingTime());
+                return Result.newBuilder().setStatus(true)
+                        .putReturns("waiting_time", String.valueOf(tx.getWaitingTime()))
+                        .putReturns("io_time", String.valueOf(tx.getIoTime()))
+                        .putReturns("locking_time", String.valueOf(tx.getLockingTime()))
+                        .putReturns("retiring_time", String.valueOf(tx.getRetiringTime()))
+                        .putReturns("initiation_time", String.valueOf(tx.getInitiationTime()))
+                        .putReturns("unlocking_time", String.valueOf(tx.getUnlockingTime()))
+                        .putReturns("committing_time", String.valueOf(tx.getCommittingTime()))
+                        .putReturns("waiting_for_others_time", String.valueOf(tx.getWaitingForOthersTime()))
+                        .putReturns("rolling_back_time", String.valueOf(tx.getRollingBackTime()))
+                        .setMessage("released").build();
+                }
             } catch (Exception e) {
                 return Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build();
             }
@@ -463,6 +568,7 @@ public class RetryFreeDBServer {
 
 
         @Override
+        //WALEED: I think this is important for my implementation
         public void setConfig(Config config, StreamObserver<Result> responseObserver) {
             Map<String, String> configMap = config.getValuesMap();
             try {

@@ -38,9 +38,10 @@ public class ConcurrencyControl {
     private static boolean BAMBOO_ENABLE = true;
     private static final boolean SHARED_LOCK_ENABLE = true;
 
+    //WALEED: is this function based on the algorithm right?
     public static void setMode(String mode) throws Exception {
         switch (mode) {
-            case "slw" -> {
+            case "slw", "ic3" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = false;
@@ -59,9 +60,6 @@ public class ConcurrencyControl {
         }
     }
 
-
-
-
     private static final long LOCK_THINKING_TIME = 0;
     public static  long OPERATION_THINKING_TIME = 0;
 
@@ -69,45 +67,41 @@ public class ConcurrencyControl {
 
     private final BiKeyHashMap<String, String, String> dirtyReads = new BiKeyHashMap<>(); // <tx, resource, value>
 
-
-
+    // WALEED: interface contain operations insert, remove, write, ...etc  (DBTransaction tx, DBInsertData data).
     private KeyValueRepository keyValueRepository;
 
     public ConcurrencyControl(String addr, String port) throws RocksDBException {
         String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
 //        TODO: fix rollback
         if (Objects.equals(port, "-1"))
-            keyValueRepository = new RocksDBRepo(addr);
+            keyValueRepository = new RocksDBRepo(addr);// WALEED: this class connect to db and implements keyValueRepository interface
         else
             keyValueRepository = new PostgresRepo(url);
 
     }
 
-
-
+    // WALEED: DBTransaction class contain transaction details ex: TS, lockingTime, resources, and so on.
     public void initTransaction(DBTransaction transaction) throws SQLException {
         if (keyValueRepository instanceof PostgresRepo) {
-            Connection conn = ((PostgresRepo) keyValueRepository).connect();
+            Connection conn = ((PostgresRepo) keyValueRepository).connect(); // WALEED: why we need to set up connection again?
             conn.setAutoCommit(false);
             transaction.setConnection(conn);
         }
     }
 
-
-
-
-
-
+    // WALEED: Locks {resourceX = Tx, resourceY = Ty, ...}? but why we have DBlock? if it contains all lock management?
     private final Map<String, DBLock> locks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> transactionResources = new ConcurrentHashMap<>();
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, DBData data) throws Exception {
         String resource = getResource(data);
         DBLock lock;
         LockType lockType = LockType.WRITE;
-        if (SHARED_LOCK_ENABLE)
+        if (SHARED_LOCK_ENABLE)//WALEED: As I see always true, right?
             lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
 
         log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
+//        computeIfAbsent computes a value for a given key if it is not already present in the map.
+//        If the key exists, returns the existing value. else it computes a new value using the provided function, puts it into the map
         lock = locks.computeIfAbsent(resource, DBLock::new);
 
 
@@ -116,7 +110,7 @@ public class ConcurrencyControl {
                 log.error("Transaction is aborted. Could not lock");
                 throw new Exception("Transaction aborted. can not lock");
             }
-
+            // WALEED: I didn't get it if statement?
             if (!lock.isHeldBefore(tx, lockType)) {
 
                 handleConflict(tx, lockType, lock, toBeAborted);
@@ -165,6 +159,7 @@ public class ConcurrencyControl {
 
     private void handleConflict(DBTransaction tx, LockType lockType, DBLock lock, Set<DBTransaction> toBeAborted) {
         synchronized (lock) {
+            // why all logic inside WW mode?
             if (WOUND_WAIT_ENABLE) {
                 boolean hasConflict = false;
                 log.info("previous holding transactons: {}", lock.getHoldingTransactions());
@@ -249,7 +244,7 @@ public class ConcurrencyControl {
             throw new RuntimeException(e);
         }
     }
-
+    // WALEED: Used for what? I didn't get it
     private static void getAdvisoryLock(Connection conn, String tableName, Integer id) throws SQLException {
         String lockSQL = "SELECT pg_advisory_lock('" + tableName + "'::regclass::integer, ?)";
         try (PreparedStatement updateStmt = conn.prepareStatement(lockSQL)) {
@@ -261,7 +256,7 @@ public class ConcurrencyControl {
         }
         log.info("Advisory lock on {},{} is acquired", tableName, id);
     }
-
+    // WALEED: Used for what? I didn't get it
     private  void unlockAllAdvisoryLocks(String tx, Connection conn) throws SQLException {
         String lockSQL = "SELECT pg_advisory_unlock_all()";
         try (PreparedStatement updateStmt = conn.prepareStatement(lockSQL)) {
@@ -275,6 +270,7 @@ public class ConcurrencyControl {
     }
 
 
+    // WALEED: after writing the new value we put this value in the dirty read map, note: we need to delete it after commit, right?
     public void unlock(DBTransaction tx, DBData data, Set<DBTransaction> toBeAborted) throws Exception {
         String resource = getResource(data);
 
@@ -289,16 +285,25 @@ public class ConcurrencyControl {
         releaseLock(tx, resource, toBeAborted);
     }
 
+    // WALEED: after commit in 2pl and in brook?
     private void releaseLock(DBTransaction tx, String resource, Set<DBTransaction> toBeAborted) {
         DBLock lock = locks.get(resource);
+        //System.out.println("Waleed tx"+tx);
+        //System.out.println("XSDSSX"+getResource(new DBData()));
+        //System.out.println("Waleed lock"+lock);
+        //System.out.println("Waleed res"+resource);
 
         releaseLockWithoutPromotion(tx, lock, toBeAborted);
         synchronized (lock) {
             lock.promoteWaiters();
             lock.notifyAll(); // Notify all waiting threads
+            //System.out.println("Waleed tx"+tx);
+            //System.out.println("Waleed lock release"+lock);
+            //System.out.println("Waleed res release"+resource);
         }
     }
 
+    // WALEED: handling if there is anything to do after release lock like abort cascade
     private void releaseLockWithoutPromotion(DBTransaction tx, DBLock lock, Set<DBTransaction> toBeAborted) {
         if (lock != null) {
             synchronized (lock) {
@@ -360,6 +365,7 @@ public class ConcurrencyControl {
         }
     }
 
+    // WALEED: unlockAll and free the resources and delete dirty values.
     public void unlockAll(DBTransaction tx, Set<DBTransaction> toBeAborted) {
 //        synchronized (locks) {
             for (String resource : tx.getResources()) {
@@ -451,9 +457,12 @@ public class ConcurrencyControl {
 //        }
 //        log.info("Locks on table {} acquired", data.getTable());
 //    }
+
+    //WALEED: release all or unlockAll all resources when TX is commited
     public void release(DBTransaction tx, Set<DBTransaction> toBeAborted) throws Exception {
         try {
-            keyValueRepository.commit(tx);
+            keyValueRepository.commit(tx);// But this method is empty? nothing there
+//            System.out.println("waleed test "+tx.getResources()+ tx.getAbort());
 //            unlockAllAdvisoryLocks(tx, conn);
             unlockAll(tx, toBeAborted);
 
@@ -462,7 +471,15 @@ public class ConcurrencyControl {
             throw e;
         }
     }
-
+    public boolean occValidate(DBTransaction tx) throws Exception{
+        try {
+            keyValueRepository.commit(tx);
+            return true;
+        } catch (Exception e) {
+            log.error("Could not commit the transaction: {}", e.getMessage());
+            return false;
+        }
+    }
 
     public void rollback(DBTransaction tx,  Set<DBTransaction> toBeAborted) throws Exception {
         try {
@@ -475,10 +492,7 @@ public class ConcurrencyControl {
 
     }
 
-
-
-
-
+    // WALEED: Get what information? A TX info?
     public String get(DBTransaction tx, DBData data) throws Exception {
         String resource = getResource(data);
 
@@ -500,26 +514,58 @@ public class ConcurrencyControl {
         delay(OPERATION_THINKING_TIME);
         return value;
     }
+    public String getStashedValue(DBTransaction tx, DBData data) throws Exception {
+        String resource = getResource(data);
+
+        long last = System.currentTimeMillis();
+        if (keyValueRepository instanceof PostgresRepo) {
+            synchronized (dirtyReads) {
+                if (dirtyReads.containsResource(resource)) {
+                    log.info("{}: dirty read of {}", tx, resource);
+                    delay(OPERATION_THINKING_TIME);
+                    return dirtyReads.getByResource(resource);
+                }
+            }
+
+            log.info("{}: dirty read time: {}", tx.getTimestamp(), System.currentTimeMillis() - last);
+        }
 
 
-
-
+        String value = keyValueRepository.readStashedValue(tx, data);
+        delay(OPERATION_THINKING_TIME);
+        return value;
+    }
 
 
     public void insert(DBTransaction tx, DBInsertData d) throws Exception {
         keyValueRepository.insert(tx, d);
     }
 
+    public void insertIC3(DBTransaction tx, DBInsertData d) throws Exception {
+        keyValueRepository.insertIC3(tx, d);
+    }
+
     public void update(DBTransaction tx, DBWriteData d) throws Exception {
         keyValueRepository.write(tx, d);
+    }
+
+    public void updateIC3(DBTransaction tx, DBWriteData d) throws Exception {
+        keyValueRepository.writeIC3(tx, d);
     }
 
     public void remove(DBTransaction tx, DBDeleteData d) throws Exception {
         keyValueRepository.remove(tx, d);
     }
+    public void removeIC3(DBTransaction tx, DBDeleteData d) throws Exception {
+        keyValueRepository.removeIC3(tx, d);
+    }
 
     public int lastId(String table) throws Exception {
         return keyValueRepository.lastId(table);
+    }
+    // todo the logic for IC3 commit like OCC
+    public boolean preCommitIC3(DBTransaction tx) throws Exception {
+        return true;
     }
 }
 

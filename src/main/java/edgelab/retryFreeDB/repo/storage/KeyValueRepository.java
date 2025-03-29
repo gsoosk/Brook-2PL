@@ -12,9 +12,13 @@ import java.util.Map;
 public interface KeyValueRepository {
     public static  long OPERATION_THINKING_TIME = 0;
     void insert(DBTransaction tx, DBInsertData data) throws Exception;
+    void insertIC3(DBTransaction tx, DBInsertData data) throws Exception;
     void remove(DBTransaction tx, DBDeleteData data) throws Exception;
+    void removeIC3(DBTransaction tx, DBDeleteData data) throws Exception;
     void write(DBTransaction tx, DBWriteData data) throws Exception;
+    void writeIC3(DBTransaction tx, DBWriteData data) throws Exception;
     String read(DBTransaction tx, DBData data) throws Exception;
+    String readStashedValue(DBTransaction tx, DBData data) throws Exception;
     Integer lastId(String table) throws Exception;
     void rollback(DBTransaction tx) throws Exception;
 

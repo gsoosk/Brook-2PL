@@ -2,7 +2,7 @@
   <configuration default="false" name="Performance" type="Application" factoryName="Application" nameIsGenerated="true">
     <option name="MAIN_CLASS_NAME" value="edgelab.retryFreeDB.benchmark.Performance" />
     <module name="slwgraph" />
-    <option name="PROGRAM_PARAMETERS" value="--address localhost --port 8000 --throughput -1 --benchmark-time 50 --hot-players ./scripts/hot_records_128_items --hot-listings ./scripts/hot_records_128_listings --hot-selection-prob 0 --max-threads 60 --max-retry 10 --read-item-number -1 --max-items-threads 10 --operation-delay 0 --2pl-mode bamboo --benchmark-mode store --num-of-warehouses 8 --hot-warehouses 1" />
+    <option name="PROGRAM_PARAMETERS" value="--address ./rocksdb/db --port -1 --throughput -1 --benchmark-time 30 --hot-players ./rocksdb/hot_records/hot_records_8_items --hot-listings ./rocksdb/hot_records/hot_records_8_listings --hot-selection-prob 100 --max-threads 32 --max-retry 10 --read-item-number -1 --max-items-threads 1 --operation-delay 0 --2pl-mode ic3 --benchmark-mode store --num-of-warehouses 8 --hot-warehouses 1 --transaction-mode storedProcedure" />
     <extension name="coverage">
       <pattern>
         <option name="PATTERN" value="edgelab.retryFreeDB.benchmark.util.*" />
@@ -11,6 +11,7 @@
     </extension>
     <method v="2">
       <option name="Make" enabled="true" />
+      <option name="RunConfigurationTask" enabled="true" run_configuration_name="rocksdb init" run_configuration_type="ShConfigurationType" />
     </method>
   </configuration>
 </component>

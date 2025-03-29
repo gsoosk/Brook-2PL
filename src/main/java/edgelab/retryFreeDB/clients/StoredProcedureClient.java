@@ -1,10 +1,6 @@
 package edgelab.retryFreeDB.clients;
 
-import edgelab.proto.Config;
-import edgelab.proto.Data;
-import edgelab.proto.Empty;
-import edgelab.proto.Result;
-import edgelab.proto.TransactionId;
+import edgelab.proto.*;
 import edgelab.retryFreeDB.RetryFreeDBServer;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
 import lombok.extern.slf4j.Slf4j;
@@ -191,10 +187,6 @@ public class StoredProcedureClient extends Client{
             }
         }
     }
-
-
-
-
     public TransactionResult TPCC_newOrderWW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
 
@@ -306,13 +298,25 @@ public class StoredProcedureClient extends Client{
         res.setMetrics(commitResult.getReturnsMap());
         return res;
     }
-
+    private TransactionResult getCommitResultOCC(String tx, TransactionResult res) {
+        Result commitResult = commitOCC(tx);
+        res.setSuccess(true);
+        res.setMetrics(commitResult.getReturnsMap());
+        return res;
+    }
     private TransactionResult getCommitResult(DBTransaction tx, TransactionResult res) {
         Result commitResult = commit(tx);
         res.setSuccess(true);
         res.setMetrics(commitResult.getReturnsMap());
         return res;
     }
+    private TransactionResult getCommitResultIC3(DBTransaction tx, TransactionResult res) {
+        Result commitResult = commitIC3(tx);
+        res.setSuccess(true);
+        res.setMetrics(commitResult.getReturnsMap());
+        return res;
+    }
+
 
     public TransactionResult TPCC_newOrderBamboo(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities) {
         TransactionResult res = new TransactionResult();
@@ -704,7 +708,6 @@ public class StoredProcedureClient extends Client{
 
         return res;
     }
-
     public TransactionResult TPCC_paymentSLW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId) {
         TransactionResult res = new TransactionResult();
         Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
@@ -903,12 +906,14 @@ public class StoredProcedureClient extends Client{
 
 
 //    remoteCalls : 4
-
+    // WALEED: I changed this method
     public TransactionResult addListing(String PId, String IId, double price) {
         return switch (mode) {
             case "slw" -> addListingSLW(PId, IId, price);
             case "bamboo" -> addListingBamboo(PId, IId, price);
             case "ww" -> addListingWW(PId, IId, price);
+            case "occ" -> addListingOCC(PId, IId, price);
+            case "ic3" -> addListingIC3(PId, IId, price);
             default -> new TransactionResult();
         };
     }
@@ -1030,9 +1035,117 @@ public class StoredProcedureClient extends Client{
 
         return res;
     }
+//-------------------------------------------------------------------------------------
+    //WALEED: addListingOCC TODO implement these functions WALEED!!!
+    public TransactionResult addListingOCC(String PId, String IId, double price) {
+        TransactionResult res = new TransactionResult();
+        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+        if (initResult.getStatus()) {
+            String transactionId = initResult.getMessage();
+            try {
+                // I deleted the lock since it's OCC,
+                // reading from tables without any lock // same code from addListingBamboo
+                Map<String, String> item = read(transactionId, "Items", "IId", IId);
+                if (item.isEmpty()) {
+                    log.info("Item does not exists!");
+                    commitOCC(transactionId);
+                    return res;
+                }
+                // check the owner
+                if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
+                    log.info("item has a different owner! {}<>{}", item.get("iowner"), PId);
+                    commitOCC(transactionId);
+                    return res;
+                }
+                // same as above I deleted the lock
+                Map<String, String> player = read(transactionId, "Players", "PId", PId);
+                // Check player exists
+                if (player.isEmpty()) {
+                    log.info("player does not exists!");
+                    commitOCC(transactionId);
+                    return res;
+                }
 
+                insert(transactionId, "Listings", IId + "," + price, "LIId,LPrice");
 
+                getCommitResultOCC(transactionId, res);
+                return res;
 
+            } catch (Exception e) {
+                rollback(transactionId);
+                return res;
+            }
+        }
+        return res;
+    }
+    public TransactionResult buyListingOCC(String PId, String LId) {
+        TransactionResult res = new TransactionResult();
+        Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
+
+        if (initResult.getStatus()) {
+            String transactionId = initResult.getMessage();
+            try{
+                // reading from tables without any lock // same code from buyListingBamboo
+                Map<String, String> listing = read(transactionId, "Listings", "LId", LId);
+                //Check listing exists
+                if (listing.isEmpty()) {
+                    log.info("listing does not exists!");
+                    commitOCC(transactionId);
+                    return res;
+                }
+
+                Map<String, String> player = read(transactionId, "Players", "PId", PId);
+                // check player exists
+                if (player.isEmpty()) {
+                    log.info("player does not exists!");
+                    commitOCC(transactionId);
+                    return res;
+                }
+                // Check players cash for listing
+                if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
+                    log.info("player does not have enough cash");
+                    commitOCC(transactionId);
+                    return res;
+                }
+
+                Map<String, String> item = read(transactionId, "Items", "IId", listing.get("liid"));
+                //Check item exists
+                if (item.isEmpty()) {
+                    log.info("item does not exists!");
+                    commitOCC(transactionId);
+                    return res;
+                }
+                //check the seller exists Based on the algorithm in the paper
+                String PPId = item.get("iowner");
+                Map<String, String> prevOwner = read(transactionId, "Players", "PId", PPId);
+                if (prevOwner.isEmpty()) {
+                    log.info("Seller does not exist!");
+                    commitOCC(transactionId);
+                    return res;
+                }
+
+                //Delete from L where LID
+                delete(transactionId, "Listings", "LId", LId);
+                //Write into Item where IId = Liid SET Iowner = pid
+                write(transactionId, "Items", "IId", listing.get("liid"), "IOwner", PId);
+                //Write into Player where Pid SET pCash = new Cash
+                String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
+                write(transactionId, "Players", "PId", PId, "Pcash", newCash);
+
+                //Write into Player where Pid SET pCash = new Cash
+                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
+                write(transactionId, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
+                getCommitResultOCC(transactionId, res);
+                res.setMessage(listing.get("liid"));
+                return res;
+            }catch (Exception e) {
+                rollback(transactionId);
+                return res;
+            }
+        }
+        return res;
+    }
+//--------------------------------------------------------------------------------------
     public TransactionResult buyListingBamboo(String PId, String LId) {
         TransactionResult res = new TransactionResult();
         Result initResult = dbService.beginTransaction(Empty.newBuilder().build());
@@ -1205,11 +1318,164 @@ public class StoredProcedureClient extends Client{
         }
         return res;
     }
+    //TODO implement these methods addListingIC3 and buyListingIC3 based on SLW methods but change the logic
+    public TransactionResult addListingIC3(String PId, String IId, double price) {
+        log.info("add listing <PID:{}, IID:{}>", PId, IId);
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+//            String transactionId = dbTransaction.getTimestamp();
+            try {
+
+                // NO need to lock the read operation, according to ic3. at commit phase we'll check the readset as OCC
+                // new read method because IC3 reads the last value "stashed value"
+                Map<String, String> item = readIC3(dbTransaction, "Items", "IId", IId);
+//             Check the owner
+                if (Integer.parseInt(item.get("iowner")) != Integer.parseInt(PId)) {
+                    log.error("item has a different owner! {}<>{}", item.get("iowner"), PId);
+                    rollback(dbTransaction);
+                    return res;
+                }
+                Map<String, String> player = readIC3(dbTransaction, "Players", "PId", PId);
+//            Check player exists
+                if (player.isEmpty()) {
+                    log.error("player does not exists!");
+                    rollback(dbTransaction);
+                    return res;
+                }
+
+                // start inserting by locking the listing, there is c edge here, we need to notify all dependent Txs after done.
+                // I assumed this lock notify all dependent Txs, {pendingTransactions.peek();}
+                String listingRecordId = insertLock(dbTransaction, "Listings").getMessage();
+                // special insert because we'll write in stashed value before commit
+                insertIC3(dbTransaction, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
+                // the same getCommitResult BUT there is check for validation like OCC [NOT DONE], ASK Farzad for help
+                getCommitResultIC3(dbTransaction, res);
+                res.setMessage(listingRecordId);
+                return res;
+
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+    public TransactionResult buyListingIC3(String PId, String LId) {
+        TransactionResult res = new TransactionResult();
+        log.info("buy listing <PID:{}, LID:{}>", PId, LId);
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Empty.newBuilder().build());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+
+
+            try {
+                //No need for locking the listing since it's just reading
+                Map<String, String> listing = readIC3(dbTransaction, "Listings", "LId", LId);
+
+//            Check player exists
+                if (listing.isEmpty()) {
+                    log.error("listing does not exists!");
+                    rollback(dbTransaction);
+                    return res;
+                }
+
+//            Read from I where LIID
+                lock(dbTransaction, "Items", "IId", listing.get("liid"));
+
+                Map<String, String> item = readIC3(dbTransaction, "Items", "IId", listing.get("liid"));
+
+                //            Check item exists
+                if (item.isEmpty()) {
+                    log.error("item does not exists!");
+                    rollback(dbTransaction);
+                    return res;
+                }
+
+//            Lock Players where pid, ppid, why is the if statement? i didn't get it
+                String PPId = item.get("iowner");
+                if (Integer.parseInt(PPId) > Integer.parseInt(PId)) {
+                    lock(dbTransaction, "Players", "PId", PId);
+                    lock(dbTransaction, "Players", "PId", PPId);
+                } else {
+                    lock(dbTransaction, "Players", "PId", PPId);
+                    lock(dbTransaction, "Players", "PId", PId);
+                }
+
+                //            Read from P where pid
+                Map<String, String> player = readIC3(dbTransaction, "Players", "PId", PId);
+//            Check player exists
+                if (player.isEmpty()) {
+                    log.error("player does not exists!");
+                    rollback(dbTransaction);
+                    return res;
+                }
+
+                //            Check players cash for listing
+                if (Double.parseDouble(player.get("pcash")) < Double.parseDouble(listing.get("lprice"))) {
+                    log.error("player does not have enough cash");
+                    rollback(dbTransaction);
+                    return res;
+                }
+
+
+                Map<String, String> prevOwner = readIC3(dbTransaction, "Players", "PId", PPId);
+                //            Check prevOwner exists
+                if (prevOwner.isEmpty()) {
+                    log.error("previous owner does not exists!");
+                    rollback(dbTransaction);
+                    return res;
+                }
+
+
+//            Delete from L where LID
+                // deleteIC3 because we're working on temporary data before commit [stashed value]
+                deleteIC3(dbTransaction, "Listings", "LId", LId);
+
+
+//          W into I where IId = Liid SET Iowner = pid
+                writeIC3(dbTransaction, "Items", "IId", listing.get("liid"), "IOwner", PId);
+                // unlock item becuase no need for locking now
+                unlock(dbTransaction, "Items", "IId", listing.get("liid"));
+
+//           W into P where Pid SET pCash = new Cash
+                String newCash = Double.toString(Double.parseDouble(player.get("pcash")) - Double.parseDouble(listing.get("lprice")));
+                writeIC3(dbTransaction, "Players", "PId", PId, "Pcash", newCash);
+
+//           W into P where Pid SET pCash = new Cash
+                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
+                writeIC3(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
+//            Unlock
+                getCommitResultIC3(dbTransaction, res);
+                res.setMessage(listing.get("liid"));
+                return res;
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+
+    // WALEED: I changed this method
     public TransactionResult buyListing(String PId, String LId) {
         return switch (mode) {
             case "slw" -> buyListingSLW(PId, LId);
             case "bamboo" -> buyListingBamboo(PId, LId);
             case "ww" -> buyListingWW(PId, LId);
+            case "occ" -> buyListingOCC(PId, LId);
+            case "ic3" -> buyListingIC3(PId, LId);
             default -> new TransactionResult();
         };
     }
@@ -1431,7 +1697,6 @@ public class StoredProcedureClient extends Client{
             throw new Exception(unlockResult.getMessage());
         return unlockResult;
     }
-
     private Result unlock(DBTransaction transaction, String tableName, String key, String value) throws Exception {
         Data lockData = Data.newBuilder()
                 .setTransactionId(transaction.getTimestamp())
@@ -1446,22 +1711,39 @@ public class StoredProcedureClient extends Client{
     private Result performRemoteOperation(Data data) {
         return dbService.update(data);
     }
-
+    private Result performRemoteOperationOCC(Data data) {
+        return dbService.updateOCC(data);
+    }
     private Result performRemoteOperation(Data data, DBTransaction tx) {
         return dbService.update(tx, data);
     }
+    // New method since ic3 reads the last value from the table not the last commited
+    private Result performRemoteOperationIC3(Data data, DBTransaction tx) {
+        return dbService.updateIC3(tx, data);
+    }
+
+
     private Result commit(String transactionId) {
         Result commitResult = dbService.commitTransaction(TransactionId.newBuilder().setId(transactionId).build());
         log.info("commit {}: {}, {}", transactionId, commitResult.getStatus(), commitResult.getMessage());
         return commitResult;
     }
-
     private Result commit(DBTransaction tx) {
         Result commitResult = dbService.commitTransaction(tx);
         log.info("commit {}: {}, {}", tx.getTimestamp(), commitResult.getStatus(), commitResult.getMessage());
         return commitResult;
     }
+    private Result commitIC3(DBTransaction tx) {
 
+        Result commitResult = dbService.commitTransactionIC3(tx);
+        log.info("commit {}: {}, {}", tx.getTimestamp(), commitResult.getStatus(), commitResult.getMessage());
+        return commitResult;
+    }
+    private Result commitOCC(String transactionId) {
+        Result commitResult = dbService.commitTransactionOCC(TransactionId.newBuilder().setId(transactionId).build());
+        log.info("commit {}: {}, {}", transactionId, commitResult.getStatus(), commitResult.getMessage());
+        return commitResult;
+    }
 
     private void write(String transactionId, String tableName, String key, String value, String newKey, String newValue) throws Exception {
         Data writeData = Data.newBuilder()
@@ -1475,7 +1757,6 @@ public class StoredProcedureClient extends Client{
         if (!writeResult.getStatus())
             throw new Exception(writeResult.getMessage());
     }
-
     private void write(DBTransaction transaction, String tableName, String key, String value, String newKey, String newValue) throws Exception {
         Data writeData = Data.newBuilder()
                 .setTransactionId(transaction.getTimestamp())
@@ -1484,6 +1765,18 @@ public class StoredProcedureClient extends Client{
                 .setValue(newKey + "," + newValue)
                 .build();
         Result writeResult = performRemoteOperation(writeData, transaction);
+        log.info("Write to {} status: {}", tableName, writeResult.getStatus());
+        if (!writeResult.getStatus())
+            throw new Exception(writeResult.getMessage());
+    }
+    private void writeIC3(DBTransaction transaction, String tableName, String key, String value, String newKey, String newValue) throws Exception {
+        Data writeData = Data.newBuilder()
+                .setTransactionId(transaction.getTimestamp())
+                .setType(WRITE_TYPE)
+                .setKey(tableName + "," + key + "," + value)
+                .setValue(newKey + "," + newValue)
+                .build();
+        Result writeResult = performRemoteOperationIC3(writeData, transaction);
         log.info("Write to {} status: {}", tableName, writeResult.getStatus());
         if (!writeResult.getStatus())
             throw new Exception(writeResult.getMessage());
@@ -1500,7 +1793,6 @@ public class StoredProcedureClient extends Client{
             throw new Exception(deleteResult.getMessage());
         log.info("delete from {} status: {}", tableName, deleteResult.getStatus());
     }
-
     private void delete(DBTransaction dbTransaction, String tableName, String key, String value) throws Exception {
         Data deleteData = Data.newBuilder()
                 .setTransactionId(dbTransaction.getTimestamp())
@@ -1508,6 +1800,17 @@ public class StoredProcedureClient extends Client{
                 .setKey(tableName + "," + key + "," + value)
                 .build();
         Result deleteResult = performRemoteOperation(deleteData, dbTransaction);
+        if (!deleteResult.getStatus())
+            throw new Exception(deleteResult.getMessage());
+        log.info("delete from {} status: {}", tableName, deleteResult.getStatus());
+    }
+    private void deleteIC3(DBTransaction dbTransaction, String tableName, String key, String value) throws Exception {
+        Data deleteData = Data.newBuilder()
+                .setTransactionId(dbTransaction.getTimestamp())
+                .setType(DELETE_TYPE)
+                .setKey(tableName + "," + key + "," + value)
+                .build();
+        Result deleteResult = performRemoteOperationIC3(deleteData, dbTransaction);
         if (!deleteResult.getStatus())
             throw new Exception(deleteResult.getMessage());
         log.info("delete from {} status: {}", tableName, deleteResult.getStatus());
@@ -1525,7 +1828,6 @@ public class StoredProcedureClient extends Client{
             log.error("{}: read from {} error: {}", transactionId, tableName, readResult.getMessage());
         return readResult.getStatus() ? convertStringToMap(readResult.getMessage()) : new HashMap<>();
     }
-
     private Map<String, String> read(DBTransaction transaction, String tableName, String key, String value)  {
         Data readData = Data.newBuilder()
                 .setTransactionId(transaction.getTimestamp())
@@ -1538,7 +1840,18 @@ public class StoredProcedureClient extends Client{
             log.error("{}: read from {} error: {}", transaction.getTimestamp(), tableName, readResult.getMessage());
         return readResult.getStatus() ? convertStringToMap(readResult.getMessage()) : new HashMap<>();
     }
-
+    private Map<String, String> readIC3(DBTransaction transaction, String tableName, String key, String value)  {
+        Data readData = Data.newBuilder()
+                .setTransactionId(transaction.getTimestamp())
+                .setType(READ_TYPE)
+                .setKey(tableName + "," + key + "," + value)
+                .build();
+        Result readResult = performRemoteOperationIC3(readData, transaction);
+        log.info("{}: read from {} status : {}",transaction.getTimestamp(), tableName, readResult.getStatus());
+        if (!readResult.getStatus())
+            log.error("{}: read from {} error: {}", transaction.getTimestamp(), tableName, readResult.getMessage());
+        return readResult.getStatus() ? convertStringToMap(readResult.getMessage()) : new HashMap<>();
+    }
 
     private void insert(String transactionId, String tableName, String newRecord, String recordId) throws Exception {
         Data insertData = Data.newBuilder()
@@ -1553,7 +1866,6 @@ public class StoredProcedureClient extends Client{
         if (!result.getStatus())
             throw new Exception(result.getMessage());
     }
-
     private void insert(String transactionId, String tableName, String newRecord, String recordId, String recordKeys) throws Exception {
         Data insertData = Data.newBuilder()
                 .setTransactionId(transactionId)
@@ -1568,6 +1880,20 @@ public class StoredProcedureClient extends Client{
         if (!result.getStatus())
             throw new Exception(result.getMessage());
     }
+//    private void insertOCC(String transactionId, String tableName, String newRecord, String recordId) throws Exception {
+//        Data insertData = Data.newBuilder()
+//                .setTransactionId(transactionId)
+//                .setType(INSERT_TYPE)
+//                .setKey(tableName)
+//                .setValue(newRecord)
+//                .setRecordId(recordId)
+//                .build();
+//        Result result = dbService.update(insertData);
+//        log.info("insert data with id {} into {} status : {}", recordId, tableName, result.getStatus());
+//        if (!result.getStatus())
+//            throw new Exception(result.getMessage());
+//    }
+//    private void insertOCC(String transactionId, String tableName, String newRecord, String recordId, String recordKeys) throws Exception {}
 
     private void insert(DBTransaction dbTransaction, String tableName, String newRecord, String recordId) throws Exception {
         Data insertData = Data.newBuilder()
@@ -1582,7 +1908,6 @@ public class StoredProcedureClient extends Client{
         if (!result.getStatus())
             throw new Exception(result.getMessage());
     }
-
     private void insert(DBTransaction dbTransaction, String tableName, String newRecord, String recordId, String recordKeys) throws Exception {
         Data insertData = Data.newBuilder()
                 .setTransactionId(dbTransaction.getTimestamp())
@@ -1593,6 +1918,20 @@ public class StoredProcedureClient extends Client{
                 .setRecordKeys(recordKeys)
                 .build();
         Result result = dbService.update(dbTransaction, insertData);
+        log.info("insert data with id {} into {} status : {}", recordId, tableName, result.getStatus());
+        if (!result.getStatus())
+            throw new Exception(result.getMessage());
+    }
+    private void insertIC3(DBTransaction dbTransaction, String tableName, String newRecord, String recordId, String recordKeys) throws Exception {
+        Data insertData = Data.newBuilder()
+                .setTransactionId(dbTransaction.getTimestamp())
+                .setType(INSERT_TYPE)
+                .setKey(tableName)
+                .setValue(newRecord)
+                .setRecordId(recordId)
+                .setRecordKeys(recordKeys)
+                .build();
+        Result result = dbService.updateIC3(dbTransaction, insertData);
         log.info("insert data with id {} into {} status : {}", recordId, tableName, result.getStatus());
         if (!result.getStatus())
             throw new Exception(result.getMessage());
@@ -1619,7 +1958,6 @@ public class StoredProcedureClient extends Client{
         log.info("{}, lock on {},{}:{} status: {} - message: {}",transactionId, tableName, key, value, lockResult.getStatus(), lockResult.getMessage());
         return lockResult;
     }
-
     private Result lock(DBTransaction transaction, String tableName, String key, String value, String type) throws Exception {
         Data lockData = Data.newBuilder()
                 .setTransactionId(transaction.getTimestamp())
@@ -1636,7 +1974,6 @@ public class StoredProcedureClient extends Client{
     private Result lock(String transactionId, String tableName, String key, String value) throws Exception {
         return lock(transactionId, tableName, key, value, WRITE_TYPE);
     }
-
     private Result lock(DBTransaction tx, String tableName, String key, String value) throws Exception {
         return lock(tx, tableName, key, value, WRITE_TYPE);
     }
@@ -1651,7 +1988,6 @@ public class StoredProcedureClient extends Client{
         log.info("lock on {} for insert status: {}", tableName, lockResult.getStatus());
         return lockResult;
     }
-
     private Result insertLock(DBTransaction tx, String tableName) {
         Data lockData = Data.newBuilder()
                 .setTransactionId(tx.getTimestamp())
@@ -1662,7 +1998,6 @@ public class StoredProcedureClient extends Client{
         log.info("lock on {} for insert status: {}", tableName, lockResult.getStatus());
         return lockResult;
     }
-
     private Result insertLock(String transactionId, String tableName, String recordId) throws Exception {
         Data lockData = Data.newBuilder()
                 .setTransactionId(transactionId)

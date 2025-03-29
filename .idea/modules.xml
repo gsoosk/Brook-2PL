@@ -2,6 +2,7 @@
 <project version="4">
   <component name="ProjectModuleManager">
     <modules>
+      <module fileurl="file://$PROJECT_DIR$/rocksdb/rocksdb.iml" filepath="$PROJECT_DIR$/rocksdb/rocksdb.iml" />
       <module fileurl="file://$PROJECT_DIR$/slwgraph.iml" filepath="$PROJECT_DIR$/slwgraph.iml" />
     </modules>
   </component>

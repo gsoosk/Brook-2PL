@@ -40,6 +40,8 @@ public class RocksDBRepo implements KeyValueRepository{
 
 //    private RocksDB rocksDB;
     private Map<String, Map<String, String>> rocksDB = new ConcurrentHashMap<>();
+    private Map<String, Map<String, String>> rocksDBStachedValue = new ConcurrentHashMap<>();
+
     private static final ObjectMapper objectMapper = new ObjectMapper();
     public RocksDBRepo(String dbDirectory) throws RocksDBException {
 
@@ -125,6 +127,26 @@ public class RocksDBRepo implements KeyValueRepository{
 
     }
 
+
+    public void insertIC3(DBTransaction tx, DBInsertData data) throws Exception {
+        log.info("{}: insert {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
+        String key = data.getTable() + ":" + data.getRecordId();
+
+
+        Map<String, String> value = new HashMap<>();
+        String[] record = data.getNewRecord().split(",");
+        String[] keys = data.getRecordKeys().split(",");
+
+        for (int i = 0 ; i < keys.length ; i++) {
+            value.put(keys[i], record[i]);
+        }
+
+        // write the value in stashed map
+        rocksDBStachedValue.put(key, value);
+        tx.appendWAL(key, null);
+
+    }
+
     @Override
     public void remove(DBTransaction tx, DBDeleteData data) throws Exception {
 //        try {
@@ -134,6 +156,16 @@ public class RocksDBRepo implements KeyValueRepository{
             Map<String, String> initValue = rocksDB.remove(key);
             if (initValue != null)
                 tx.appendWAL(key, initValue);
+
+    }
+    public void removeIC3(DBTransaction tx, DBDeleteData data) throws Exception {
+//        try {
+        log.info("{}: remove {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
+        String key = getKey(data);
+
+        Map<String, String> initValue = rocksDBStachedValue.remove(key);
+        if (initValue != null)
+            tx.appendWAL(key, initValue);
 
     }
 
@@ -155,6 +187,29 @@ public class RocksDBRepo implements KeyValueRepository{
             value.put(data.getVariable(), data.getValue());
             rocksDB.put(key, value);
         } catch (RocksDBException e) {
+            log.error("{}: Could not write <{},{}>",tx.getTimestamp(), data.getTable() , data.getIds());
+            throw e;
+        }
+
+    }
+    // the changes in the stashedValue, however after commit write the changes in the rocksDB
+    public void writeIC3(DBTransaction tx, DBWriteData data) throws Exception {
+        try {
+            log.info("{}: update {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
+            String key = getKey(data);
+
+            /* There is a logical lock on the key*/
+            Map<String, String> value = rocksDBStachedValue.get(key);
+            if (value == null)
+                throw new RocksDBException("not existed");
+            tx.appendWAL(key, value);
+
+            if (!value.containsKey(data.getVariable()))
+                throw new RocksDBException("does not contain variable: " + data.getVariable());
+
+            value.put(data.getVariable(), data.getValue());
+            rocksDBStachedValue.put(key, value);
+        } catch (RocksDBException e) { // I got this error in all txs
             log.error("{}: Could not write <{},{}>",tx.getTimestamp(), data.getTable() , data.getIds());
             throw e;
         }
@@ -199,6 +254,39 @@ public class RocksDBRepo implements KeyValueRepository{
         }
     }
 
+    public String readStashedValue(DBTransaction tx, DBData data) throws Exception {
+        try {
+            log.info("{}: get {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
+            String dbKey = getKey(data);
+            Map<String, String> mapData;
+             //read from rocksDB if it's empty or doesn't have the key (data)
+            if (rocksDBStachedValue.isEmpty() || !rocksDBStachedValue.containsKey(dbKey)) {
+                for (Map.Entry<String, Map<String, String>> entry : rocksDB.entrySet()) {
+                    rocksDBStachedValue.put(entry.getKey(), new HashMap<>(entry.getValue()));
+                }
+            }
+            mapData = rocksDBStachedValue.get(dbKey);
+
+            if (mapData == null)
+                throw new RocksDBException("not existed");
+
+
+            StringBuilder value = new StringBuilder();
+            for (String key : mapData.keySet()) {
+                value.append(key.toLowerCase()).append(":");
+                value.append(mapData.get(key));
+
+                value.append(",");
+            }
+
+            value.delete(value.length()-1, value.length());
+            return value.toString();
+        } catch (RocksDBException e) {
+            log.error("Could not read <{}>", getKey(data));
+            throw e;
+        }
+    }
+
     @Override
     public Integer lastId(String table) throws Exception {
         if (InitStoreBenchmark.lastIdUsed.containsKey(table))
@@ -223,4 +311,25 @@ public class RocksDBRepo implements KeyValueRepository{
     public void commit(DBTransaction tx) throws Exception {
 
     }
+    // Commit in the database after commit
+    public void commitIC3(DBTransaction tx, DBInsertData data) throws Exception {
+        log.info("{}: commit {}:{}",tx.getTimestamp(), data.getTable(), data.getIds());
+        String key = data.getTable() + ":" + data.getRecordId();
+
+
+        Map<String, String> value = new HashMap<>();
+        String[] record = data.getNewRecord().split(",");
+        String[] keys = data.getRecordKeys().split(",");
+
+        for (int i = 0 ; i < keys.length ; i++) {
+            value.put(keys[i], record[i]);
+        }
+
+
+        rocksDB.put(key, value);
+        tx.appendWAL(key, null);
+
+    }
+
 }
+
