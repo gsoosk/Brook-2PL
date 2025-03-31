@@ -1455,7 +1455,7 @@ public class StoredProcedureClient extends Client{
 //           W into P where Pid SET pCash = new Cash
                 String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("pcash")) + Double.parseDouble(listing.get("lprice")));
                 writeIC3(dbTransaction, "Players", "PId", PPId, "Pcash", prevOwnerNewCash);
-//            Unlock
+//            Unlock based on the static analysis of IC3, we have to unlock player table before commit
                 getCommitResultIC3(dbTransaction, res);
                 res.setMessage(listing.get("liid"));
                 return res;
