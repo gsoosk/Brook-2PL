@@ -7,6 +7,9 @@ This repository showcases the Brook-2PL protocol, a deadlock-free Two-Phase Lock
 2. **Partial transaction chopping** for early lock release, improving concurrency.
 
 ## Project Structure
+### Experiment Results
+[Experiment Results](https://github.com/gsoosk/Brook-2PL/tree/main/ExperimentResults) directory contains all the paper experiment results and their plots. 
+
 
 ### RetryFreeDB
 
