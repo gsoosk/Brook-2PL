@@ -1,61 +1,81 @@
 
 # Brook-2PL
-This repository showcases the development of brook-2pl, a deadlock-free two-phase locking protocol designed for high contention workloads. It (1) introduces SLW-Graph for enabling deadlock-free transaction execution, and (2) proposes partial transaction chopping to facilitate early lock release.
 
+This repository showcases the Brook-2PL protocol, a deadlock-free Two-Phase Locking (2PL) mechanism optimized for high-contention database workloads. Brook-2PL introduces:
 
-## Structure
+1. **SLW-Graph** for ensuring deadlock-free execution.
+2. **Partial transaction chopping** for early lock release, improving concurrency.
 
-* [RetryFreeDB](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB) implements a transaction system featuring Brook-2PL, Wound-Wait, and Bamboo as two-phase locking protocols.
-  * The [repo](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB/repo) directory contains the implementation of the transaction system.
-  * The [slwGraph](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB/slwGraph) directory includes an application designed to verify the correctness of the SLW-Graph representation of transactions.
-  * The [benchmark](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB/benchmark) directory contains a benchmarking application to evaluate the performance of the retry-free database system.
+## Project Structure
 
+### RetryFreeDB
 
-For a list of supported operations by RetryFreeDB, please refer to the [valid RPCs](https://github.com/gsoosk/Brook-2PL/blob/main/src/main/proto/RetryFreeDB.proto).
+[RetryFreeDB](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB) implements a transaction data system featuring three concurrency control protocols:
 
+- **Brook-2PL** (Deadlock-Free)
+- **Wound-Wait**
+- **Bamboo**
 
+Key directories include:
 
-## How to run? 
+- [`repo`](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB/repo): Transaction system implementation.
+- [`slwGraph`](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB/slwGraph): Brook-2PL static analysis for deadlock-free transactions. `TXCheck.java` application in this repository can preprocess transactions into deadlock-free transactions. 
+- [`benchmark`](https://github.com/gsoosk/Brook-2PL/tree/main/src/main/java/edgelab/retryFreeDB/benchmark): Benchmarking application for evaluating transaction system performance.
 
-### Ansible
-We provide two ansible playbooks to install requirements and build/deploy applications on servers specified in inventory.
-For more information, please refer to their [README](./ansible/README.md).
+See the full list of supported operations by RetryFreeDB in the [RPC definitions](https://github.com/gsoosk/Brook-2PL/blob/main/src/main/proto/RetryFreeDB.proto).
 
+## Getting Started
 
-### Data Initialization
-To initialize the database, use [this ansible](https://github.com/gsoosk/Brook-2PL/blob/main/ansible/postgres.yml) script by changing the data to either `tpcc` or `store`. 
-### Build
-In order to run the following programs, their code should be built by maven: 
-```
+### Requirements
+- Java 11+
+- Maven
+- Ansible
+
+### Installation
+Clone and build the repository:
+
+```bash
+git clone https://github.com/gsoosk/Brook-2PL.git
+cd Brook-2PL
 mvn clean install
 ```
-### RetryFreeDB Server
 
-Run the servers
-```
-java -jar ./target/Server.jar <server_port> <server_address> <postgres_port> <db_tables_seperated_by_comma>
-```
-### Performance
-This program benchmarks a cluster by putting a desired load on the system based on the provided configuration. 
+### Data Initialization
 
-```
-java -jar ./target/Client.jar --help                                                                                                       
+To initialize the database, use [this Ansible script](https://github.com/gsoosk/Brook-2PL/blob/main/ansible/rocksdb_init.yml) by specifying the workload as either `tpcc` or `store`:
 
-usage: producer-performance [-h] --address ADDRESS --port PORT [--result-file RESULT-FILE] [--metric-file METRIC-FILE] [--partition-id PARTITION-ID]          
-                            [--batch-size BATCH-SIZE] [--payload-delimiter PAYLOAD-DELIMITER] --throughput THROUGHPUT [--interval INTERVAL] [--timeout TIMEOUT]
-                            [--dynamic-batch-size DYNAMICBATCHSIZE] [--dynamic-batch-time DYNAMICBATCHTIME] [--dynamic-interval DYNAMICINTERVAL]
-                            [--dynamic-interval-time DYNAMICINTERVALTIME] [--exponential-load EXPONENTIALLOAD] [--dynamic-memory MEMORYTRIGGER]
-                            [--dynamic-memory-time MEMORYTRIGGERTIME] --hot-players HOTPLAYERS --hot-listings HOTLISTING --hot-selection-prob HOTSELECTION
-                            [--max-threads MAXTHREADS] [--max-retry MAXRETRY] [--max-items-threads MAXITEMSTHREADS] --read-item-number READITEMNUMBER
-                            [--operation-delay OPERATIONDELAY] [--2pl-mode 2PLMODE] [--benchmark-mode BENCHMARK_MODE] [--num-of-warehouses WAREHOUSECOUNT]
-                            [--hot-warehouses HOTWAREHOUSE] (--num-records NUM-RECORDS | --benchmark-time BENCHMARK-TIME)
+```bash
+ansible-playbook ansible/rocksdb_init.yml
+```
+
+### Running the Server
+
+Launch the RetryFreeDB server for interactive execution of transactions:
+
+```bash
+java -jar ./target/Server.jar <server_port> <server_address> <postgres_port> <db_tables_comma_separated>
+```
+
+### Performance Benchmarking
+
+Or you can run benchmarks to evaluate the concurrency protocols. The benchmarking applications run transactions in Stored-Procedure mode and do not require a different execution of the RetryFreeDB Server:
+
+```bash
+java -jar ./target/Client.jar --help
+usage: producer-performance [-h] --address ADDRESS --port PORT [--result-file RESULT-FILE] [--metric-file METRIC-FILE] [--partition-id PARTITION-ID] [--batch-size BATCH-SIZE]             
+                            [--payload-delimiter PAYLOAD-DELIMITER] --throughput THROUGHPUT [--interval INTERVAL] [--timeout TIMEOUT] [--dynamic-batch-size DYNAMICBATCHSIZE]
+                            [--dynamic-batch-time DYNAMICBATCHTIME] [--dynamic-interval DYNAMICINTERVAL] [--dynamic-interval-time DYNAMICINTERVALTIME] [--exponential-load EXPONENTIALLOAD]
+                            [--dynamic-memory MEMORYTRIGGER] [--dynamic-memory-time MEMORYTRIGGERTIME] --hot-players HOTPLAYERS --hot-listings HOTLISTING --hot-selection-prob HOTSELECTION
+                            [--max-threads MAXTHREADS] [--max-retry MAXRETRY] [--max-items-threads MAXITEMSTHREADS] --read-item-number READITEMNUMBER [--operation-delay OPERATIONDELAY]
+                            [--2pl-mode 2PLMODE] [--benchmark-mode BENCHMARK_MODE] [--num-of-warehouses WAREHOUSECOUNT] [--hot-warehouses HOTWAREHOUSE] [--transaction-mode TRANSACTIONMODE]
+                            (--num-records NUM-RECORDS | --benchmark-time BENCHMARK-TIME)
 
 This tool is used to verify the producer performance.
 
 named arguments:
   -h, --help             show this help message and exit
-  --address ADDRESS      leader's address
-  --port PORT            leader's port
+  --address ADDRESS      Server address for interactive client / Postgres address for stored procedure / Rocksdb directory
+  --port PORT            Server port for interactive client / Postgres port for stored procedure / -1 For rocksdb
   --result-file RESULT-FILE
                          a csv file containing the total result of benchmark
   --metric-file METRIC-FILE
@@ -65,8 +85,8 @@ named arguments:
   --batch-size BATCH-SIZE
                          batch size in bytes. This producer batches records in this size and send them to kv store
   --payload-delimiter PAYLOAD-DELIMITER
-                         provides delimiter to be used when --payload-file is provided. Defaults to  new  line. Note that this parameter will be ignored if --payload-file is
-                         not provided. (default: \n)
+                         provides delimiter to be used when --payload-file is provided. Defaults to new line.  Note  that this parameter will be ignored if --payload-file is not provided. (default:
+                         \n)
   --throughput THROUGHPUT
                          throttle maximum message throughput to *approximately* THROUGHPUT messages/sec. Set this to -1 to disable throttling.
   --interval INTERVAL    interval between each packet.  Set this -1 to send packets blocking
@@ -107,6 +127,8 @@ named arguments:
                          number of warehouses in tpcc benchmark. (default: 1)
   --hot-warehouses HOTWAREHOUSE
                          number of hot warehouse records in tpcc benchmark. (default: 0)
+  --transaction-mode TRANSACTIONMODE
+                         Transaction execution mode. could be either "interactive" or "storedProcedure" (default: interactive)
 
   either --num-records or --benchmark-time must be specified but not both.
 
@@ -114,9 +136,30 @@ named arguments:
                          number of messages to produce
   --benchmark-time BENCHMARK-TIME
                          benchmark time in seconds
-                                                                                                       
 ```
-### Automated Benchmark
-We provide some docker-compose and shell script scripts run `server` and `benchmark` programs automatically. For these scripts please refer to [here](https://github.com/gsoosk/Brook-2PL/tree/main/ansible/roles/build/files)
 
+Example TPC-C Benchmark command:
+
+```bash
+java -jar ./target/Client.jar \
+  --address ./rocksdb/checkpoint \
+  --port -1 \
+  --throughput -1 \
+  --benchmark-time 60 \
+  --hot-selection-prob 0 \
+  --max-threads 64 \
+  --max-retry 10 \
+  --operation-delay 0 \
+  --2pl-mode slw \
+  --benchmark-mode tpcc \
+  --num-of-warehouses 16 \
+  --hot-warehouses 16 \
+  --transaction-mode storedProcedure
+```
+
+### Ansible Deployment
+
+Ansible scripts are provided to automate the deployment of the server and benchmarking tools on remote servers. Refer to the [deployment scripts](https://github.com/gsoosk/Brook-2PL/tree/main/ansible/roles/build/files) for details.
+
+For further information on Ansible deployments, refer to the dedicated [README](./ansible/README.md).
 
