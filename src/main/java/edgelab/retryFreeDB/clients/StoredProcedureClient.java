@@ -13,15 +13,7 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.sql.SQLException;
 import java.sql.Timestamp;
-import java.util.Arrays;
-import java.util.Comparator;
-import java.util.HashMap;
-import java.util.HashSet;
-import java.util.List;
-import java.util.Map;
-import java.util.Objects;
-import java.util.Random;
-import java.util.Set;
+import java.util.*;
 import java.util.concurrent.ConcurrentHashMap;
 
 import static edgelab.retryFreeDB.RetryFreeDBConfiguration.DELETE_TYPE;
@@ -775,7 +767,7 @@ public class StoredProcedureClient extends Client{
 
 
 //                Early Release of Locks: Unlock warehouse and district
-                if (!Performance.INTERACTIVE) {
+               if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING) {
                     unlock(dbTransaction, "warehouse", "w_id", warehouseId);
                     unlock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
                 }
@@ -1080,7 +1072,7 @@ public class StoredProcedureClient extends Client{
             if (mode.equals("bamboo")) {
                 if (readItemBamboo(items, dbTransaction)) return false;
             } else if (mode.equals("ww")) {
-                return !readItems(items, dbTransaction);
+                if (readItems(items, dbTransaction)) return false;
             }
             else {
                 if (readItemSLW(items, dbTransaction)) return false;
@@ -1090,7 +1082,6 @@ public class StoredProcedureClient extends Client{
         }
         return false;
     }
-
     private boolean readItemSLW(List<String> items, DBTransaction tx) {
 //        Collections.sort(items);
         return readItems(items, tx);
@@ -1102,6 +1093,13 @@ public class StoredProcedureClient extends Client{
                     items) {
                 lock(tx, "Items", "IId", IId, READ_TYPE);
                 Map<String, String> item = read(tx, "Items", "IId", IId);
+
+//                if (mode.equals("bamboo"))
+//                    retireLock(tx, "Items", "IId", IId);
+//                else
+                if (mode.equals("slw"))
+                    unlock(tx, "Items", "IId", IId);
+//                else if ()
 
             }
         } catch (Exception e) {
@@ -1465,7 +1463,7 @@ public class StoredProcedureClient extends Client{
                 }
 
                 atomicLock(dbTransaction, "Players", "PId", List.of(PId));
-                if (!Performance.INTERACTIVE)
+                if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING)
                     unlock(dbTransaction, "Items", "IId", IId);
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
 //            Check player exists
@@ -1776,12 +1774,12 @@ public class StoredProcedureClient extends Client{
 
 //            Delete from L where LID
                 delete(dbTransaction, "Listings", "LId", LId);
-                if (!Performance.INTERACTIVE)
+               if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING)
                     unlock(dbTransaction, "Listings", "LId", LId);
 
 //          W into I where IId = LIId SET IOwner = pid
                 write(dbTransaction, "Items", "IId", listing.get("LIId"), "IOwner", PId);
-                if (!Performance.INTERACTIVE)
+               if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING)
                     unlock(dbTransaction, "Items", "IId", listing.get("LIId"));
 
 //            delay(3000);

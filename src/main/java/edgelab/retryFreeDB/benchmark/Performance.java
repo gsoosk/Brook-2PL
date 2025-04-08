@@ -204,7 +204,7 @@ public class Performance {
 //    private List<Pair<String, String>> hotPlayersAndItems = new CopyOnWriteArrayList<>();
     private ConcurrentLinkedQueue<Pair<String, String>> hotPlayersAndItems = new ConcurrentLinkedQueue<>();
     private List<String> hotPlayers = new CopyOnWriteArrayList<>();
-    private final List<String> hotItems = new CopyOnWriteArrayList<>(); // for read only tx
+    private List<String> hotItems = new ArrayList<>(); // for read only tx
 //    private ConcurrentLinkedQueue<Pair<String, String>> hotListings; // current listings: lid, iid
 //    private List<Pair<String, String>> hotListings = new CopyOnWriteArrayList<>();
     private ConcurrentLinkedQueue<Pair<String, String>> hotListings = new ConcurrentLinkedQueue<>();
@@ -225,10 +225,10 @@ public class Performance {
     private AtomicInteger buy_or_sell_hot = new AtomicInteger(1);
     public static final RandomGenerator random = new RandomGenerator(1234);
 
-
+    public static final boolean PARTIAL_CHOPPING = true;
     private final boolean TPCC_HIGH_CONTENTION = true;
     public static final boolean INTERACTIVE = false;
-    private final int INTERACTIVE_RECORD_COUNT = 5;
+    private final int INTERACTIVE_RECORD_COUNT = 10;
     private static ConcurrentLinkedQueue<Pair<String, String>> readHotPlayerRecords(String filePath) {
         List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
@@ -579,22 +579,39 @@ public class Performance {
             log.info("Item read thread has been created");
             for (int j = 0; j < MAX_ITEM_READ_THREADS; j++) {
                 itemExecutor.submit(() -> {
+                    List<String> itemsToGet = new ArrayList<>();
+                    List<String> copyHotItems = new ArrayList<>(hotItems);
+                    boolean retry = false;
                     while (stats.isRunning()) {
                         // generate a List that contains the numbers 0 to hotItems.Size
-                        List<String> copyHotItems = new ArrayList<>(hotItems);
-                        List<String> itemsToGet = new ArrayList<>();
-                        for (int i = 0; i < numberOfItemsToRead; i++) {
-                            int randomIndex = random.nextInt(copyHotItems.size());
-                            itemsToGet.add(copyHotItems.get(randomIndex));
-                            copyHotItems.remove(randomIndex);
+
+
+                        if (!retry) {
+                            int randomIndex = random.nextInt(copyHotItems.size() - numberOfItemsToRead);
+                            itemsToGet = new ArrayList<>(copyHotItems.subList(randomIndex, randomIndex + numberOfItemsToRead));
                         }
+//                        List<String> copyHotItems = new ArrayList<>(hotItems);
+//                        List<String> itemsToGet = new ArrayList<>();
+
+//                        for (int i = 0; i < numberOfItemsToRead; i++) {
+//                            int randomIndex = random.nextInt(copyHotItems.size());
+//                            itemsToGet.add(copyHotItems.get(randomIndex));
+//                            copyHotItems.remove(randomIndex);
+//                        }
 
 
                         boolean status = client.readItem(itemsToGet);
-                        log.info("Items {} read finished", copyHotItems);
-                        if (status)
+                        log.info("Items {} read finished status: {}", itemsToGet, status);
+                        if (status) {
                             stats.itemReadFinished();
+                            retry = false;
+                        }
+                        else
+                            retry = true;
+
+
                     }
+//                    System.out.println("out of thread");
                 });
             }
         });
@@ -914,7 +931,7 @@ public class Performance {
 
             } else {
                 Map<String, String> tx = new HashMap<>();
-                if (currBuyOrSell % 2 == 0 && (100 - HOT_RECORD_SELECTION_CHANCE)/100 * currBuyOrSell > 1000) {
+                if (currBuyOrSell % 2 == 0 && (100 - HOT_RECORD_SELECTION_CHANCE)/100f * currBuyOrSell > 1000 && !notHotListings.isEmpty()) {
                     String lid, pid;
 //                if (nextNotHotListingID.get() >= NUM_OF_LISTINGS) {
                     Pair<String, String> listing = notHotListings.remove();
@@ -1162,7 +1179,11 @@ public class Performance {
 
             // TODO: add number of conflicts and wounds/aborts as ablation study
             log.info("request successful {}", request.getValues());
+            if (request.getType() == StoreServerRequest.Type.INTERACTIVE) {
+                stats.itemReadFinished();
+            }
         }
+
     }
 
     private boolean isGoingToRetry(ServerRequest request) {
@@ -1641,7 +1662,7 @@ public class Performance {
         private AtomicLong sellHotRecordNum;
 
 
-        private int itemCount;
+        private AtomicLong itemCount;
 
         private AtomicBoolean running;
         private long finished;
@@ -1704,6 +1725,7 @@ public class Performance {
             this.buyHotRecordNum = new AtomicLong(0);
             this.sellRecordNum = new AtomicLong(0);
             this.sellHotRecordNum = new AtomicLong(0);
+            this.itemCount = new AtomicLong(0);
         }
 
         private void createResultCSVFiles(String resultFilePath) {
@@ -1807,7 +1829,7 @@ public class Performance {
 
 
             double recsPerSec = 1000.0 * count.get() / (double) elapsed;
-            double itemsPerSec = 1000.0 * itemCount / (double) elapsed;
+            double itemsPerSec = 1000.0 * itemCount.get() / (double) elapsed;
             double mbPerSec = 1000.0 * this.bytes.get() / (double) elapsed / (1024.0);
 //            double throughputMbPerSec = 1000.0 * this.startedBytes / (double) elapsed / (1024.0);
             int[] percs = percentiles(this.latencies, index.get(), 0.5, 0.95, 0.99, 0.999);
@@ -1899,7 +1921,7 @@ public class Performance {
             int[] values = new int[percentiles.length];
             for (int i = 0; i < percentiles.length; i++) {
                 int index = (int) (percentiles[i] * size);
-                if (latencyArrays.get(index) != null)
+                if (index < latencyArrays.size() && latencyArrays.get(index) != null)
                     values[i] = latencyArrays.get(index);
                 else
                     values[i] = -1;
@@ -1952,7 +1974,7 @@ public class Performance {
         public void itemReadFinished() {
             if (warmup.get())
                 return;
-            this.itemCount++;
+            this.itemCount.incrementAndGet();
         }
 
         public void addAblationTimes(long now, long start, long waitingTime, long ioTime, long lockingTime, long retiringTime, long initiationTime, long unlockingTime, long committingTime, long waitingForOthersTime, long rollingBackTime) {
