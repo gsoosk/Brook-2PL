@@ -1,0 +1,4 @@
+addListing(PId, IId, price):
+X = Read(Item, IId)
+Y = Read(Player, PId)
+Insert(Listing)

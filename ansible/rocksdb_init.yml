@@ -5,8 +5,10 @@
 
   vars:
     CHECKPOINT: "rocksdb/checkpoint"
-    INITIALIZER: "app/InitStoreBenchmark.jar"
+    STORE_INITIALIZER: "app/InitStoreBenchmark.jar"
+    TPCC_INITIALIZER: "app/InitTPCCBenchmark.java"
     HOTSPOTS: "rocksdb/hotspots"
+    BENCHMARK: "store"  # tpcc | store
 
   tasks:
     - name: Create target directory
@@ -16,8 +18,12 @@
         mode: 0755
 
     - name: Run initializer
-      command: "java -jar {{ INITIALIZER }} {{ CHECKPOINT }} {{HOTSPOTS}}"
+      command: "java -jar {{ STORE_INITIALIZER }} {{ CHECKPOINT }} {{HOTSPOTS}}"
+      when: "{{ BENCHMARK == 'store'}}"
 
+    - name: Run initializer
+      command: "java -jar {{ TPCC_INITIALIZER }} {{ CHECKPOINT }} {{HOTSPOTS}}"
+      when: "{{ BENCHMARK == 'tpcc'}}"
 
 
 

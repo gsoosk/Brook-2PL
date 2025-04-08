@@ -148,7 +148,7 @@ public class PostgresRepo implements KeyValueRepository {
     }
 
     @Override
-    public String read(DBTransaction tx, DBData data) throws Exception {
+    public Map<String, String> read(DBTransaction tx, DBData data) throws Exception {
         Connection conn = tx.getConnection();
         StringBuilder value = new StringBuilder();
         String SQL = "SELECT * FROM "+ data.getTable() +" WHERE ";
@@ -181,7 +181,7 @@ public class PostgresRepo implements KeyValueRepository {
             log.error("could not read: {}", ex.getMessage());
             throw ex;
         }
-        return value.toString();
+        return null; //FIXME: convert value to map
     }
 
     @Override

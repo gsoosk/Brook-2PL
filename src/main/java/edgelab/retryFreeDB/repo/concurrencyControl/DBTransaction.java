@@ -1,5 +1,7 @@
 package edgelab.retryFreeDB.repo.concurrencyControl;
 
+import edgelab.retryFreeDB.benchmark.Performance;
+import edgelab.retryFreeDB.benchmark.util.TPCCUtil;
 import lombok.Getter;
 import lombok.Setter;
 import org.jgrapht.alg.util.Pair;
@@ -10,19 +12,30 @@ import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.Optional;
+import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
 public class DBTransaction {
+    private static final long DEADLOCK_TIMEOUT = 1_000_000;
     @Getter
     private String timestamp;
     @Getter
     private AtomicBoolean abort = new AtomicBoolean(false);
+    private final AtomicBoolean rollBacked = new AtomicBoolean(false);
     @Getter
     @Setter
     private Connection connection;
+
+    @Getter
+    @Setter
+    private boolean interactiveTransaction;
+
+
+    @Getter
+    private long randomPriority;
 
 
     @Getter
@@ -44,6 +57,8 @@ public class DBTransaction {
     @Getter
     private long rollingBackTime;
 
+    @Getter
+    private long startTime;
     private long previousRetireStart = -1;
     private long previousWaitStart = -1;
     private long previousIOStart = -1;
@@ -74,6 +89,8 @@ public class DBTransaction {
         this.waitingForOthersTime = 0;
         this.rollingBackTime = 0;
         this.WAL = new ConcurrentHashMap<>();
+        this.randomPriority = Performance.random.nextLong();
+        this.startTime = System.nanoTime();
     }
 
     @Override
@@ -119,8 +136,7 @@ public class DBTransaction {
         while (!this.canCommit()) {
             if (isAbort())
                 throw new Exception("transaction already aborted");
-            Thread.sleep(1);
-
+            Thread.sleep(0, 1000);
         }
     }
 
@@ -140,7 +156,10 @@ public class DBTransaction {
 
     public void startWaitingForOthers() {previousWaitingForOthersStart = System.nanoTime();}
 
-    public void startRollingBack() { previousRollBackStart = System.nanoTime(); }
+    public void startRollingBack() {
+        rollBacked.set(true);
+        previousRollBackStart = System.nanoTime();
+    }
 
 
     public void wakesUp() {
@@ -191,5 +210,11 @@ public class DBTransaction {
     }
 
 
+    public boolean isRolledBack() {
+        return rollBacked.get();
+    }
 
+    public boolean isDeadLock() {
+        return System.nanoTime() - startTime > DEADLOCK_TIMEOUT;
+    }
 }

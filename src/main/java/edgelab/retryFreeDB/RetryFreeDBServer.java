@@ -3,6 +3,7 @@ package edgelab.retryFreeDB;
 import edgelab.proto.Config;
 import edgelab.proto.Data;
 import edgelab.proto.Empty;
+import edgelab.proto.LockData;
 import edgelab.proto.TransactionId;
 import edgelab.proto.Result;
 import edgelab.proto.RetryFreeDBServerGrpc;
@@ -21,7 +22,10 @@ import lombok.extern.slf4j.Slf4j;
 import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
+import java.util.HashMap;
+import java.util.List;
 import java.util.Map;
+import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
@@ -68,7 +72,9 @@ public class RetryFreeDBServer {
     @Slf4j
     public static class RetryFreeDBService extends RetryFreeDBServerGrpc.RetryFreeDBServerImplBase {
         private final ConcurrencyControl repo;
+        private String mode = "";
         ConcurrentHashMap<String, DBTransaction> transactions;
+        ConcurrentHashMap<String, DBTransaction> interactiveTransactions;
 //        Bamboo:
         Set<DBTransaction> toBeAbortedTransactions = ConcurrentHashMap.newKeySet();
         ConcurrentHashMap<String, AtomicInteger> lastIdUsed = new ConcurrentHashMap<>();
@@ -76,6 +82,7 @@ public class RetryFreeDBServer {
         public RetryFreeDBService(String postgresAddress, String postgresPort, String[] tables) throws Exception {
             repo = new ConcurrencyControl(postgresAddress, postgresPort);
             transactions = new ConcurrentHashMap<>();
+            interactiveTransactions = new ConcurrentHashMap<>();
             lastTransactionId =  new AtomicLong(0);
 
             for (String table :
@@ -84,20 +91,17 @@ public class RetryFreeDBServer {
             }
             log.info("Table metadata initialization finished");
 
-            ExecutorService executor = Executors.newSingleThreadExecutor();
-            executor.submit(this::abortTransactionsThatNeedsToBeAborted);
-
         }
 
         @Override
-        public void beginTransaction(Empty request, StreamObserver<Result> responseObserver) {
+        public void beginTransaction(Data request, StreamObserver<Result> responseObserver) {
            Result result = beginTransaction(request);
 
            responseObserver.onNext(result);
            responseObserver.onCompleted();
         }
 
-        public Result beginTransaction(Empty request) {
+        public Result beginTransaction(Data request) {
             try  {
                 DBTransaction transaction = getTransaction(request);
 
@@ -113,13 +117,23 @@ public class RetryFreeDBServer {
             }
         }
 
-        public DBTransaction getTransaction(Empty request) throws SQLException {
+        public DBTransaction getTransaction(Data request) throws SQLException {
             long startTime = System.nanoTime();
 
-            long transactionId = lastTransactionId.incrementAndGet();
-            DBTransaction transaction = new DBTransaction(Long.toString(transactionId));
+            String transactionId;
+            if ( request.getTransactionId().isEmpty())
+                transactionId = String.valueOf(lastTransactionId.incrementAndGet());
+            else
+                transactionId = request.getTransactionId();
+
+            DBTransaction transaction = new DBTransaction(transactionId);
+            if (request.getInteractiveTransaction()) {
+                transaction.setInteractiveTransaction(true);
+                interactiveTransactions.put(transactionId, transaction);
+            }
+
             repo.initTransaction(transaction);
-            transactions.put(Long.toString(transactionId), transaction);
+            transactions.put(transactionId, transaction);
 
             transaction.finishInitiation(startTime);
 
@@ -142,10 +156,33 @@ public class RetryFreeDBServer {
 
             if (tx.isAbort()) {
                 log.info("{}: Transaction already aborted", tx);
+                try {
+                    abortTransaction(tx);
+                } catch (Exception ignored) {
+                }
                 return true;
             }
             return false;
         }
+
+        private void abortTransaction(DBTransaction tx) throws Exception {
+            if (tx.isRolledBack())
+                return;
+            tx.startRollingBack();
+            log.info("{}: needs to be aborted Try to abort.", tx);
+            log.info("abort size: {}", toBeAbortedTransactions.size());
+            try {
+                repo.rollback(tx, toBeAbortedTransactions);
+                transactions.remove(tx.getTimestamp());
+                log.warn("{}, Transaciton rollbacked", tx);
+            } catch (Exception e) {
+                log.error("Could not abort the transaction {}:{}", tx, e);
+                throw e;
+            }
+            toBeAbortedTransactions.remove(tx);
+            tx.finishRollingBack();
+        }
+
         public Result lock(Data request) {
             DBTransaction tx = transactions.get(request.getTransactionId());
             return lock(tx, request);
@@ -174,6 +211,67 @@ public class RetryFreeDBServer {
 
             tx.finishLocking();
             return Result.newBuilder().setStatus(false).setMessage("Could not lock").build();
+        }
+
+        public Result lock(DBTransaction tx, LockData request) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not lock - tx is invalid").build();
+
+            tx.startLocking();
+
+            try {
+                repo.lock(tx,  toBeAbortedTransactions, request);
+                tx.finishLocking();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
+            } catch (Exception e) {
+                log.error(e.getMessage());
+            }
+
+            tx.finishLocking();
+            return Result.newBuilder().setStatus(false).setMessage("Could not lock").build();
+        }
+
+        public Result tryLock(DBTransaction tx, Data request) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not lock - tx is invalid").build();
+
+            tx.startLocking();
+            DBData d = deserilizeDataToDBData(request);
+
+            if (d != null) {
+                try {
+                    repo.tryLock(tx, d);
+                    tx.finishLocking();
+                    if (d instanceof DBInsertData)
+                        return Result.newBuilder().setStatus(true).setMessage(((DBInsertData) d).getRecordId()).build();
+                    else
+                        return Result.newBuilder().setStatus(true).setMessage("done").build();
+                } catch (Exception e) {
+                    log.info(e.getMessage());
+                }
+            }
+
+            tx.finishLocking();
+            return Result.newBuilder().setStatus(false).setMessage("Could not try lock").build();
+        }
+
+        public Result atomicLock(DBTransaction tx, String tableName, String key, List<String> values) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could not lock - tx is invalid").build();
+
+            tx.startLocking();
+
+
+            try {
+                repo.atomicLock(tx, tableName, values, toBeAbortedTransactions);
+                tx.finishLocking();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
+            } catch (Exception e) {
+                log.info(e.getMessage());
+            }
+
+            tx.finishLocking();
+            return Result.newBuilder().setStatus(false).setMessage("Could not try lock").build();
         }
 
 
@@ -262,7 +360,6 @@ public class RetryFreeDBServer {
 
         private Result updateDBDataOnRepo(DBData d, DBTransaction tx) {
             try {
-                String result = "done";
                 if (d instanceof DBDeleteData)
                     repo.remove(tx, (DBDeleteData) d);
                 else if (d instanceof DBWriteData)
@@ -270,8 +367,8 @@ public class RetryFreeDBServer {
                 else if(d instanceof DBInsertData)
                     repo.insert(tx, (DBInsertData) d);
                 else
-                    result = repo.get(tx, d);
-                return Result.newBuilder().setStatus(true).setMessage(result).build();
+                    return Result.newBuilder().putAllReturns(repo.get(tx, d)).setStatus(true).setMessage("done").build();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
             }
             catch (Exception ex) {
                 tx.finishIO();
@@ -287,7 +384,7 @@ public class RetryFreeDBServer {
 
         private void abortTransactionsThatNeedsToBeAborted() {
             while(true) {
-                if (!toBeAbortedTransactions.isEmpty()) {
+                if (!interactiveTransactions.isEmpty()) {
 //                    log.info("waiting");
 //                    try {
 //                        Thread.sleep(1);
@@ -295,18 +392,19 @@ public class RetryFreeDBServer {
 //                        throw new RuntimeException(e);
 //                    }
 //                } else {
-
-                    for (DBTransaction tx : toBeAbortedTransactions) {
-                        log.info("{}: needs to be aborted Try to abort.", tx);
-                        log.info("abort size: {}", toBeAbortedTransactions.size());
+                    for (String tx : interactiveTransactions.keySet()) {
                         try {
-                            repo.rollback(tx, toBeAbortedTransactions);
-                            transactions.remove(tx);
-                            log.warn("{}, Transaciton rollbacked", tx);
+                            DBTransaction transaction = interactiveTransactions.get(tx);
+                            if (transaction.isDeadLock()) {
+                                transaction.setAbort();
+                                toBeAbortedTransactions.add(transaction);
+                                abortTransaction(transaction);
+                                interactiveTransactions.remove(tx);
+                                log.info("{}: Forced abort transaction because of deadlock", tx);
+                            }
                         } catch (Exception e) {
-                            log.error("Could not abort the transaction {}:{}", tx, e);
+                            log.error("Could not abort interactive tx: {}", e.getMessage());
                         }
-                        toBeAbortedTransactions.remove(tx);
                     }
                 }
             }
@@ -394,17 +492,22 @@ public class RetryFreeDBServer {
 
 
         public Result rollBackTransaction(DBTransaction tx) {
-            if (isTransactionInvalid(tx))
+            if (tx == null)
                 return Result.newBuilder().setStatus(false).setMessage("Could not rollback - tx is invalid").build();
             try {
-                tx.startRollingBack();
-                repo.rollback(tx, toBeAbortedTransactions);
-                transactions.remove(tx.toString());
+                abortTransaction(tx);
                 log.warn("{}, Transaciton rollbacked, total waiting time: {}", tx, tx.getWaitingTime());
-                tx.finishRollingBack();
 
-
-                return Result.newBuilder().setStatus(true).putReturns("waiting_time", String.valueOf(tx.getWaitingTime())).setMessage("rollbacked").build();
+                return Result.newBuilder().putReturns("waiting_time", String.valueOf(tx.getWaitingTime()))
+                        .putReturns("io_time", String.valueOf(tx.getIoTime()))
+                        .putReturns("locking_time", String.valueOf(tx.getLockingTime()))
+                        .putReturns("retiring_time", String.valueOf(tx.getRetiringTime()))
+                        .putReturns("initiation_time", String.valueOf(tx.getInitiationTime()))
+                        .putReturns("unlocking_time", String.valueOf(tx.getUnlockingTime()))
+                        .putReturns("committing_time", String.valueOf(tx.getCommittingTime()))
+                        .putReturns("waiting_for_others_time", String.valueOf(tx.getWaitingForOthersTime()))
+                        .putReturns("rolling_back_time", String.valueOf(tx.getRollingBackTime()))
+                        .setMessage("rollbacked").build();
             } catch (Exception e) {
                 tx.finishRollingBack();
                 return Result.newBuilder().setStatus(false).setMessage("Could not rollback and release the locks").build();
@@ -420,8 +523,11 @@ public class RetryFreeDBServer {
         }
 
         public Result bambooRetireLock(Data request) {
-
             DBTransaction tx = transactions.get(request.getTransactionId());
+            return bambooRetireLock(request, tx);
+        }
+
+        public Result bambooRetireLock(Data request, DBTransaction tx) {
             if (isTransactionInvalid(tx))
                 return Result.newBuilder().setStatus(false).setMessage("Could not retire - tx is invalid").build();
 
@@ -445,30 +551,56 @@ public class RetryFreeDBServer {
 
         @Override
         public void bambooWaitForCommit(TransactionId transactionId, StreamObserver<Result> responseObserver) {
-            if (isTransactionInvalid(transactionId.getId(), responseObserver)) return;
+            Result result = bambooWaitForCommit(transactionId);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
+        }
 
+        public Result bambooWaitForCommit(TransactionId transactionId) {
             DBTransaction tx = transactions.get(transactionId.getId());
+            return bambooWaitForCommit(tx);
+        }
+
+        public Result bambooWaitForCommit(DBTransaction tx) {
+            if (isTransactionInvalid(tx))
+                return Result.newBuilder().setStatus(false).setMessage("Could bamboo wait for commit - tx is invalid").build();
+
             tx.startWaitingForOthers();
+            Result result;
             try {
                 log.info("{}: wait for commit", tx);
                 tx.waitForCommit();
-                responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage("done").build());
-                responseObserver.onCompleted();
+                result = Result.newBuilder().setStatus(true).setMessage("done").build();
             } catch (Exception e) {
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Error:" + e.getMessage()).build());
-                responseObserver.onCompleted();
+                try {
+                    abortTransaction(tx); // tx is aborted could not wait anymore
+                } catch (Exception ignored) {
+                }
+                result = Result.newBuilder().setStatus(false).setMessage("Error:" + e.getMessage()).build();
             }
             tx.finishWaitingForOthers();
+            return result;
         }
 
 
         @Override
         public void setConfig(Config config, StreamObserver<Result> responseObserver) {
+           Result result = setConfig(config);
+            responseObserver.onNext(result);
+            responseObserver.onCompleted();
+        }
+
+        public Result setConfig(Config config) {
             Map<String, String> configMap = config.getValuesMap();
             try {
                 if (configMap.containsKey("mode")) {
+                    this.mode = configMap.get("mode");
                     ConcurrencyControl.setMode(configMap.get("mode"));
                     log.info("2pl mode is set to :{}", configMap.get("mode"));
+//                    if (Objects.equals(this.mode, "slw")) {
+////                        ExecutorService executor = Executors.newSingleThreadExecutor();
+////                        executor.submit(this::abortTransactionsThatNeedsToBeAborted);
+//                    }
                 }
 
                 if (configMap.containsKey("operationDelay")) {
@@ -476,15 +608,15 @@ public class RetryFreeDBServer {
                     log.info("operation thinking time is set to {}", Integer.parseInt(configMap.get("operationDelay")));
                 }
 
-                responseObserver.onNext(Result.newBuilder().setStatus(true).setMessage("done").build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(true).setMessage("done").build();
             }
             catch (Exception e) {
-                responseObserver.onNext(Result.newBuilder().setStatus(false).setMessage("Error:" + e.getMessage()).build());
-                responseObserver.onCompleted();
+                return Result.newBuilder().setStatus(false).setMessage("Error:" + e.getMessage()).build();
             }
-
         }
+
+
+
 
 //
 //        @Override
@@ -554,84 +686,4 @@ public class RetryFreeDBServer {
 
     }
 
-    public static class RetryFreeDBServiceWrapper {
-        private final RetryFreeDBService service;
-
-        public RetryFreeDBServiceWrapper(RetryFreeDBService service) {
-            this.service = service;
-        }
-
-        // Helper to simplify StreamObserver-based calls
-        private <T> T executeWithObserver(java.util.function.Consumer<StreamObserver<T>> consumer) {
-            CompletableFuture<T> future = new CompletableFuture<>();
-            StreamObserver<T> observer = new StreamObserver<>() {
-                @Override
-                public void onNext(T value) {
-                    future.complete(value);
-                }
-
-                @Override
-                public void onError(Throwable t) {
-                    future.completeExceptionally(t);
-                }
-
-                @Override
-                public void onCompleted() {
-                    // No-op
-                }
-            };
-            consumer.accept(observer);
-            try {
-                return future.get(); // Block and wait for the response
-            } catch (Exception e) {
-                throw new RuntimeException("gRPC method call failed", e);
-            }
-        }
-
-        // Wrapper for beginTransaction
-        public Result beginTransaction(Empty empty) {
-            return executeWithObserver(observer -> service.beginTransaction(empty, observer));
-        }
-
-        // Wrapper for lock
-        public Result lock(Data request) {
-            return executeWithObserver(observer -> service.lock(request, observer));
-        }
-
-        // Wrapper for unlock
-        public Result unlock(Data request) {
-            return executeWithObserver(observer -> service.unlock(request, observer));
-        }
-
-
-        // Wrapper for update
-        public Result update(Data request) {
-            return executeWithObserver(observer -> service.update(request, observer));
-        }
-
-        // Wrapper for commitTransaction
-        public Result commitTransaction(TransactionId transactionId) {
-            return executeWithObserver(observer -> service.commitTransaction(transactionId, observer));
-        }
-
-        // Wrapper for rollBackTransaction
-        public Result rollBackTransaction(TransactionId transactionId) {
-            return executeWithObserver(observer -> service.rollBackTransaction(transactionId, observer));
-        }
-
-        // Wrapper for bambooRetireLock
-        public Result bambooRetireLock(Data request) {
-            return executeWithObserver(observer -> service.bambooRetireLock(request, observer));
-        }
-
-        // Wrapper for bambooWaitForCommit
-        public Result bambooWaitForCommit(TransactionId transactionId) {
-            return executeWithObserver(observer -> service.bambooWaitForCommit(transactionId, observer));
-        }
-
-        // Wrapper for setConfig
-        public Result setConfig(Config config) {
-            return executeWithObserver(observer -> service.setConfig(config, observer));
-        }
-    }
 }

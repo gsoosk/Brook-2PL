@@ -1,31 +1,24 @@
 package edgelab.retryFreeDB.repo.concurrencyControl;
 
 import com.google.common.base.Joiner;
-import com.zaxxer.hikari.HikariConfig;
-import com.zaxxer.hikari.HikariDataSource;
+import edgelab.proto.LockData;
+import edgelab.retryFreeDB.benchmark.Performance;
 import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBDeleteData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBInsertData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBWriteData;
 import edgelab.retryFreeDB.repo.concurrencyControl.util.BiKeyHashMap;
+import edgelab.retryFreeDB.repo.storage.InMemoryRepo;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
-import edgelab.retryFreeDB.repo.storage.RocksDBRepo;
 import lombok.extern.slf4j.Slf4j;
-import org.postgresql.PGConnection;
 import org.rocksdb.RocksDBException;
 
 import java.sql.Connection;
-import java.sql.DatabaseMetaData;
-import java.sql.DriverManager;
 import java.sql.PreparedStatement;
-import java.sql.ResultSet;
-import java.sql.ResultSetMetaData;
 import java.sql.SQLException;
-import java.sql.Statement;
-import java.util.Collections;
-import java.util.HashMap;
 import java.util.HashSet;
+import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
@@ -34,6 +27,7 @@ import java.util.concurrent.ConcurrentHashMap;
 @Slf4j
 public class ConcurrencyControl {
     private static final String DEADLOCK_ERROR = "40P01";
+    private static boolean SLW_ENABLE = false;
     private static boolean WOUND_WAIT_ENABLE = true;
     private static boolean BAMBOO_ENABLE = true;
     private static final boolean SHARED_LOCK_ENABLE = true;
@@ -43,17 +37,26 @@ public class ConcurrencyControl {
             case "slw" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = false;
+                ConcurrencyControl.SLW_ENABLE = true;
                 DBLock.BAMBOO_ENABLE = false;
+                DBLock.WOUND_WAIT_ENABLE = false;
+                DBLock.SLW_ENABLE = true;
             }
             case "ww" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
+                ConcurrencyControl.SLW_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = false;
+                DBLock.WOUND_WAIT_ENABLE = true;
+                DBLock.SLW_ENABLE = false;
             }
             case "bamboo" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = true;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
+                ConcurrencyControl.SLW_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = true;
+                DBLock.WOUND_WAIT_ENABLE = true;
+                DBLock.SLW_ENABLE = false;
             }
             default -> throw new Exception("This mode of 2pl is not supported by server");
         }
@@ -76,8 +79,10 @@ public class ConcurrencyControl {
     public ConcurrencyControl(String addr, String port) throws RocksDBException {
         String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
 //        TODO: fix rollback
-        if (Objects.equals(port, "-1"))
-            keyValueRepository = new RocksDBRepo(addr);
+        if (Objects.equals(port, "-1")) {
+            keyValueRepository = new InMemoryRepo(addr);
+            this.locks = new ConcurrentHashMap<>(((InMemoryRepo) keyValueRepository).getDBSize(), 0.75f);
+        }
         else
             keyValueRepository = new PostgresRepo(url);
 
@@ -98,17 +103,28 @@ public class ConcurrencyControl {
 
 
 
-    private final Map<String, DBLock> locks = new ConcurrentHashMap<>();
+    private Map<String, DBLock> locks = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, Set<String>> transactionResources = new ConcurrentHashMap<>();
+
+    public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, LockData data) throws Exception {
+        String resource = data.getResource();
+        LockType lockType = LockType.WRITE;
+        if (SHARED_LOCK_ENABLE)
+            lockType = data.getLockType() == edgelab.proto.LockType.READ ? LockType.READ : LockType.WRITE;
+        lockLogic(tx, toBeAborted, resource, lockType);
+    }
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, DBData data) throws Exception {
         String resource = getResource(data);
-        DBLock lock;
         LockType lockType = LockType.WRITE;
         if (SHARED_LOCK_ENABLE)
             lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
+        lockLogic(tx, toBeAborted, resource, lockType);
+    }
 
-        log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
-        lock = locks.computeIfAbsent(resource, DBLock::new);
+    private void lockLogic(DBTransaction tx, Set<DBTransaction> toBeAborted, String resource, LockType lockType) throws Exception {
+        DBLock lock;
+        log.info("{}, try to lock {}, <{}>", tx, resource, lockType);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
 
 
         synchronized (lock) {
@@ -120,11 +136,137 @@ public class ConcurrencyControl {
             if (!lock.isHeldBefore(tx, lockType)) {
 
                 handleConflict(tx, lockType, lock, toBeAborted);
+                if(tx.isAbort()) {
+                    log.error("Transaction is aborted. Could not lock");
+                    throw new Exception("Transaction aborted. can not lock");
+                }
 
 
                 lock.addPending(tx, lockType);
                 log.info("new pending transactons: {}", lock.printPendingLocks());
                 tx.addResource(lock.getResource());
+
+
+                lock.promoteWaiters();
+                lock.notifyAll();
+
+                while (!lock.isHeldBefore(tx, lockType)) {
+                    try {
+                        log.info("{}: waiting for lock on {}", tx, resource);
+                        log.info("{}: previous holding transactons: {}",tx, lock.getHoldingTransactions());
+                        tx.startWaiting();
+                        lock.wait();
+                        if (tx.isAbort()) {
+                            log.error("Transaction is aborted. Could not lock");
+                            throw new Exception("Transaction aborted. can not lock");
+                        }
+                        log.info("{}: wakes up to check the lock {}", tx, resource);
+                        tx.wakesUp();
+
+                    } catch (InterruptedException e) {
+                        Thread.currentThread().interrupt();
+                    }
+                }
+            }
+            tx.addResource(lock.getResource());
+            log.info("{}: Lock granted on {} for {}", tx, resource, lockType);
+        }
+
+        delay(LOCK_THINKING_TIME);
+    }
+
+    public void tryLock(DBTransaction tx, DBData data) throws Exception {
+        if (BAMBOO_ENABLE || WOUND_WAIT_ENABLE)
+            throw new Exception("Brook2PL is not enabled!");
+
+        String resource = getResource(data);
+        DBLock lock;
+        LockType lockType = LockType.WRITE;
+        if (SHARED_LOCK_ENABLE)
+            lockType = (!(data instanceof DBWriteData) && !(data instanceof DBInsertData) && !(data instanceof DBDeleteData)) ? LockType.READ : LockType.WRITE;
+
+
+
+        log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
+
+
+        synchronized (lock) {
+            if (tx.isAbort()) {
+                log.error("Transaction is aborted. Could not lock");
+                throw new Exception("Transaction aborted. can not lock");
+            }
+
+            if (!lock.isHeldBefore(tx, lockType)) {
+
+                lock.addPending(tx, lockType);
+                log.info("new pending transactons: {}", lock.printPendingLocks());
+
+
+                lock.promoteWaiters();
+                lock.notifyAll();
+
+                if (!lock.isHeldBefore(tx, lockType)) {
+                    lock.releasePending(tx);
+                    throw new Exception("Try failed: tx is not granted!");
+                }
+            }
+            tx.addResource(lock.getResource());
+            log.info("{}: Lock granted on {} for {}", tx, resource, lockType);
+        }
+
+        delay(LOCK_THINKING_TIME);
+    }
+
+    public boolean waitDieLock(DBTransaction tx, String resource) throws Exception {
+        // this method orders transactions based on
+        if (BAMBOO_ENABLE || WOUND_WAIT_ENABLE)
+            throw new Exception("Brook2PL is not enabled!");
+
+        DBLock lock;
+        LockType lockType = LockType.WRITE;
+
+
+        log.info("{}, try to lock {}, <{}>",tx, resource, lockType);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, true));
+
+
+        synchronized (lock) {
+            if (tx.isAbort()) {
+                log.error("Transaction is aborted. Could not lock");
+                throw new Exception("Transaction aborted. can not lock");
+            }
+
+            if (!lock.isHeldBefore(tx, lockType)) {
+
+
+
+                boolean hasConflict = false;
+                log.info("previous holding transactons: {}", lock.getHoldingTransactions());
+                log.info("previous pending transactons: {}", lock.printPendingLocks());
+                log.info("previous retired transactons: {}", lock.getRetiredTransactions());
+                Set<DBTransaction> toCheckTransactions = new HashSet<>(lock.getHoldingTransactions());
+//                toCheckTransactions.add(lock.getPendingTransactions().getLast());
+
+
+                for (DBTransaction t : toCheckTransactions) {
+                    if (lock.conflict(t, tx, lockType)) {
+                        hasConflict = true;
+                        log.info("{}: conflict detected {}", tx, t);
+                    }
+
+                    // can not lock if tx is younger
+                    if (hasConflict && Long.parseLong(t.toString()) < Long.parseLong(tx.toString())) {
+                        log.info("{}: can not lock {} -- too young", tx, resource);
+                        return false;
+                    }
+                }
+
+
+
+
+                lock.addPending(tx, lockType);
+                log.info("new pending transactons: {}", lock.printPendingLocks());
 
 
                 lock.promoteWaiters();
@@ -152,10 +294,39 @@ public class ConcurrencyControl {
         }
 
         delay(LOCK_THINKING_TIME);
+        return true;
+    }
+    
+    public void atomicLock(DBTransaction tx, String tableName, List<String> values, Set<DBTransaction> toBeAborted) throws Exception {
+        boolean allLocked = false;
+        while (!allLocked) {
+            for (int i = 0; i < values.size(); i++) {
+
+                String resource = getResource(tableName, values.get(i));
+                if (!waitDieLock(tx, resource)) {
+                    for (int j = 0 ; j < i; j++) {
+                        String releaseResource = getResource(tableName, values.get(j));
+                        releaseLock(tx, releaseResource, toBeAborted);
+                    }
+                    tx.startWaiting();
+                    // Retry to get the locks in order after 8 micro second
+                    Thread.sleep(0, 8 * 1000);
+                    tx.wakesUp();
+                    break;
+                }
+                if (i == values.size() - 1)
+                    allLocked = true;
+            }
+        }
     }
 
+    private static String getResource(String tableName, String value) {
+        return tableName + "," + value;
+    }
+
+
     private static String getResource(DBData data) {
-        return (data instanceof DBInsertData) ? data.getTable() + "," + ((DBInsertData) data).getRecordId() : data.getTable() + "," + Joiner.on(",").join(data.getQueries());
+        return (data instanceof DBInsertData) ? getResource(data.getTable(), ((DBInsertData) data).getRecordId()) : getResource(data.getTable(), Joiner.on(",").join(data.getQueries()));
     }
 
     private void addNewResourceForTransaction(String tx, String resource) {
@@ -164,8 +335,10 @@ public class ConcurrencyControl {
     }
 
     private void handleConflict(DBTransaction tx, LockType lockType, DBLock lock, Set<DBTransaction> toBeAborted) {
+        if (SLW_ENABLE && !Performance.INTERACTIVE) // no need to handle conflict in slw stored procedure mode
+            return;
+
         synchronized (lock) {
-            if (WOUND_WAIT_ENABLE) {
                 boolean hasConflict = false;
                 log.info("previous holding transactons: {}", lock.getHoldingTransactions());
                 log.info("previous pending transactons: {}", lock.printPendingLocks());
@@ -179,24 +352,40 @@ public class ConcurrencyControl {
                         hasConflict = true;
                         log.info("{}: conflict detected {}", tx, t);
                     }
-
-                    if (hasConflict && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
+                    if (!hasConflict)
+                        continue;
+                    if (WOUND_WAIT_ENABLE) {
+                        if (Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
 //                    abort transaction t
-                        toBeAborted.add(t);
-                        t.setAbort();
-                        releaseLockWithoutPromotion(t, lock, toBeAborted);
+                            toBeAborted.add(t);
+                            t.setAbort();
+                            releaseLockWithoutPromotion(t, lock, toBeAborted);
 
 
 //                    unlockAll(t);
 //                    lock.release(t);
 //                    transactionResources.get(t).remove(lock.getResource());
 
-                        log.info("{}: Wound-wait: {} aborted by {}", tx, t, tx);
-                        log.info("after holding transactons: {}", lock.getHoldingTransactions());
+                            log.info("{}: Wound-wait: {} aborted by {}", tx, t, tx);
+                            log.info("after holding transactons: {}", lock.getHoldingTransactions());
 //                        return;
+                        }
+                    } else if (SLW_ENABLE) {
+                        if (t.isInteractiveTransaction() && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) { // ww for interactive transactions
+                            toBeAborted.add(t);
+                            t.setAbort();
+                            releaseLockWithoutPromotion(t, lock, toBeAborted);
+                        }
+                        else if (t.isInteractiveTransaction() && tx.isInteractiveTransaction()) {
+                            continue;
+                        }
+                        else if (tx.isInteractiveTransaction() && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
+                            toBeAborted.add(tx);
+                            tx.setAbort();
+                            releaseLockWithoutPromotion(tx, lock, toBeAborted);
+                        }
                     }
                 }
-            }
         }
     }
 
@@ -279,11 +468,11 @@ public class ConcurrencyControl {
         String resource = getResource(data);
 
         if (keyValueRepository instanceof PostgresRepo) {
-            String dirtyRead = keyValueRepository.read(tx, data);
-            synchronized (dirtyReads) {
-                log.info("{}: adding dirty read for {}", tx, resource);
-                dirtyReads.put(tx.toString(), resource, dirtyRead);
-            }
+//            String dirtyRead = keyValueRepository.read(tx, data);
+//            synchronized (dirtyReads) {
+//                log.info("{}: adding dirty read for {}", tx, resource);
+//                dirtyReads.put(tx.toString(), resource, dirtyRead);
+//            }
         }
 
         releaseLock(tx, resource, toBeAborted);
@@ -296,6 +485,8 @@ public class ConcurrencyControl {
         synchronized (lock) {
             lock.promoteWaiters();
             lock.notifyAll(); // Notify all waiting threads
+//            if (lock.isEmpty())
+//                locks.remove(resource);
         }
     }
 
@@ -326,6 +517,7 @@ public class ConcurrencyControl {
                         }
 
                         boolean wasHead = lock.isHeadOfRetried(tx);
+
 
                         lock.release(tx);
                         tx.removeResource(lock.getResource());
@@ -387,26 +579,29 @@ public class ConcurrencyControl {
         DBLock lock;
 
         log.info("{}, retiring the lock {}", tx, resource);
-        lock = locks.computeIfAbsent(resource, DBLock::new);
+        lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
 
         if (lock != null) {
             synchronized (lock) {
                 if (!lock.getHoldingTransactions().contains(tx))
                     throw new Exception("Bamboo: does not hold the lock to retire");
+
+
                 lock.retire(tx);
 
                 log.info("{}: Lock retired  on {}", tx, lock.getResource());
 
                 lock.promoteWaiters();
                 lock.notifyAll(); // Notify all waiting threads
+
             }
 
             if (keyValueRepository instanceof PostgresRepo) {
-                String dirtyRead = keyValueRepository.read(tx, data);
-                synchronized (dirtyReads) {
-                    log.info("{}: adding dirty read for {}", tx, resource);
-                    dirtyReads.put(tx.toString(), resource, dirtyRead);
-                }
+//                String dirtyRead = keyValueRepository.read(tx, data);
+//                synchronized (dirtyReads) {
+//                    log.info("{}: adding dirty read for {}", tx, resource);
+//                    dirtyReads.put(tx.toString(), resource, dirtyRead);
+//                }
             }
         }
         else {
@@ -479,24 +674,24 @@ public class ConcurrencyControl {
 
 
 
-    public String get(DBTransaction tx, DBData data) throws Exception {
+    public Map<String, String> get(DBTransaction tx, DBData data) throws Exception {
         String resource = getResource(data);
 
         long last = System.currentTimeMillis();
         if (keyValueRepository instanceof PostgresRepo) {
-            synchronized (dirtyReads) {
-                if (dirtyReads.containsResource(resource)) {
-                    log.info("{}: dirty read of {}", tx, resource);
-                    delay(OPERATION_THINKING_TIME);
-                    return dirtyReads.getByResource(resource);
-                }
-            }
+//            synchronized (dirtyReads) {
+//                if (dirtyReads.containsResource(resource)) {
+//                    log.info("{}: dirty read of {}", tx, resource);
+//                    delay(OPERATION_THINKING_TIME);
+//                    return dirtyReads.getByResource(resource);
+//                }
+//            }
 
             log.info("{}: dirty read time: {}", tx.getTimestamp(), System.currentTimeMillis() - last);
         }
 
 
-        String value = keyValueRepository.read(tx, data);
+        Map<String, String> value = keyValueRepository.read(tx, data);
         delay(OPERATION_THINKING_TIME);
         return value;
     }

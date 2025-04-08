@@ -120,6 +120,38 @@
               </transformers>
             </configuration>
           </execution>
+          <execution>
+            <id>4</id>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <finalName>InitTPCCBenchmark</finalName>
+              <transformers>
+                <transformer />
+                <transformer>
+                  <mainClass>edgelab.retryFreeDB.init.InitTPCCBenchmark</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
+          <execution>
+            <id>5</id>
+            <goals>
+              <goal>shade</goal>
+            </goals>
+            <configuration>
+              <shadedArtifactAttached>true</shadedArtifactAttached>
+              <finalName>TXCheck</finalName>
+              <transformers>
+                <transformer />
+                <transformer>
+                  <mainClass>edgelab.retryFreeDB.slwGraph.TXCheck</mainClass>
+                </transformer>
+              </transformers>
+            </configuration>
+          </execution>
         </executions>
       </plugin>
     </plugins>

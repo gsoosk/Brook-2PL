@@ -1,0 +1,5 @@
+TX(warehouseId, districtId, threshold, txId):
+  D = Read(district, warehouseId_districtId)         // Retrieve D_NEXT_O_ID as o_id
+  SC = Read(order_line ⋈ stock, warehouseId_districtId,
+            OL_O_ID in [o_id-20, o_id) AND S_QUANTITY < threshold)
+       // Count distinct S_I_ID from the join

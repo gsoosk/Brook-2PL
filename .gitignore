@@ -15,6 +15,9 @@ scripts/tpcc/tpcc_config_temp.xml
 /rocksdb/
 /rocksdb
 
+output.txt
+
+.venv/*
 ./.venv
 
 

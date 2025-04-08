@@ -1,20 +1,23 @@
 package edgelab.retryFreeDB.slwGraph.nodes;
 
-import lombok.Builder;
-import lombok.Data;
 import lombok.Getter;
 import lombok.Setter;
 
 @Getter
 public abstract class UpdateNode extends TXNode{
 
-    public UpdateNode(String tableName) {
+    public UpdateNode(String tableName, String id) {
         this.tableName = tableName;
+        this.id = id;
     }
 
     @Setter
     protected String tableName;
-
-
-
+    protected String id;
+    @Setter
+    @Getter
+    protected boolean commutative = false;
+    @Setter
+    @Getter
+    protected boolean selfCommutative = false;
 }

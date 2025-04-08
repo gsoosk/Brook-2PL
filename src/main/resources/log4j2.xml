@@ -9,9 +9,9 @@
     </Appenders>
     <Loggers>
 <!--        <Root level="info">-->
-        <Root level="error">
+<!--        <Root level="error">-->
 
-<!--        <Root level="off">-->
+        <Root level="off">
 
 <!--            <AppenderRef ref="metrics"/>-->
             <AppenderRef ref="console"/>

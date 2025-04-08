@@ -1,3 +1,11 @@
+- name: Create target directory
+  file:
+    path: app/code
+    state: directory
+    mode: 0755
+
+
+
 - name: copy source
   synchronize:
     src: ../../../src/
