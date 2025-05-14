@@ -138,7 +138,7 @@ public class InitStoreBenchmark {
         }
     }
 
-    private static final List<Integer> HOT_RECORDS_PLAYERS = Arrays.asList(1, 2, 4, 8, 16, 32, 64, 128, 256);
+    private static final List<Integer> HOT_RECORDS_PLAYERS = Arrays.asList(1, 2, 4, 8, 16, 32, 64, 128, 256, 512);
 
 
 

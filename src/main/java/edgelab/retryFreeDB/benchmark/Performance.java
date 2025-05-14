@@ -227,8 +227,9 @@ public class Performance {
 
     public static final boolean PARTIAL_CHOPPING = true;
     private final boolean TPCC_HIGH_CONTENTION = true;
-    public static final boolean INTERACTIVE = false;
-    private final int INTERACTIVE_RECORD_COUNT = 10;
+    public static boolean INTERACTIVE = false;
+    private final int INTERACTIVE_RECORD_COUNT = 7;
+    private int INTERACTIVE_CHANCE = 10;
     private static ConcurrentLinkedQueue<Pair<String, String>> readHotPlayerRecords(String filePath) {
         List<Pair<String, String>> list = new ArrayList<>();
         try (BufferedReader reader = new BufferedReader(new FileReader(filePath))) {
@@ -330,6 +331,12 @@ public class Performance {
         List<Long> dynamicMemory = res.getList("dynamicMemory");
         List<Integer> dynamicMemoryTime = res.getList("dynamicMemoryTime");
 
+        if (res.getInt("interactiveChance") != null && res.getInt("interactiveChance") != -1) {
+            INTERACTIVE_CHANCE = res.getInt("interactiveChance");
+            INTERACTIVE = true;
+            System.out.println("Dynamic Transactions are enabled");
+        }
+
         //         METRICS
         DefaultExports.initialize(); // export jvm
         HTTPServer metricServer = new HTTPServer.Builder()
@@ -401,7 +408,7 @@ public class Performance {
 
 //            TODO: Refactor this function
         long startToWaitTime = System.currentTimeMillis();
-        Stats stats = new Stats(10000000, 1000, resultFilePath, metricsFilePath, recordSize, 0, 0.0, 0, 20000, benchmarkMode.equals("store") ? res.getString("hotPlayers") : String.valueOf(NUM_OF_HOT_WAREHOUSE), HOT_RECORD_SELECTION_CHANCE, MAX_THREADS, res.getString("2PLMode"), operationDelay);
+        Stats stats = new Stats(10000000, 1000, resultFilePath, metricsFilePath, recordSize, 0, 0.0, 0, 20000, benchmarkMode.equals("store") ? res.getString("hotPlayers") : String.valueOf(NUM_OF_HOT_WAREHOUSE), HOT_RECORD_SELECTION_CHANCE, MAX_THREADS, res.getString("2PLMode"), operationDelay, INTERACTIVE_CHANCE);
 
         Integer numberOfItemsToRead = res.get("readItemNumber");
         Thread itemThread = null;
@@ -647,9 +654,10 @@ public class Performance {
 
 
         if (INTERACTIVE) {
-            if (txChance < 47.5) {
+
+            if (txChance < (100 - INTERACTIVE_CHANCE) / 2) {
                 return getTPCCPaymentRandomRequest(warehouseId);
-            } else if (txChance < 95){
+            } else if (txChance < (100 - INTERACTIVE_CHANCE)){
                 return getTPCCNewOrderRequest(warehouseId);
             } else {
                 return getTPCCInteractiveRequest();
@@ -809,47 +817,52 @@ public class Performance {
     private TPCCServerRequest getTPCCInteractiveRequest() {
         int numberOfWarehouses = notHotWarehouses.size();
         int numberOfDistricts = numberOfWarehouses * TPCCConfig.configDistPerWhse;
-        int numberOfCustomers = 0;
-//                numberOfDistricts * TPCCConfig.configCustPerDist;
-        int numberOfItems = 0;
-//                TPCCConfig.configItemCount;
+        int numberOfCustomers = numberOfDistricts * TPCCConfig.configCustPerDist;
+        int numberOfItems = TPCCConfig.configItemCount;
         int totalRecords = numberOfWarehouses + numberOfDistricts + numberOfCustomers + numberOfItems;
 
         List<List<String>> modifyLists = new ArrayList<>(); // Each inner list: <Table, Key, Value>
 
         for (int i = 0; i < INTERACTIVE_RECORD_COUNT; i++) {
-            int r = TPCCUtil.randomNumber(1, totalRecords, random);
             List<String> modifyEntry = new ArrayList<>();
-
-            if (r <= numberOfWarehouses) {
-                int wId = r; //
+            if (random.nextInt(100) < HOT_RECORD_SELECTION_CHANCE && !hotWarehouses.isEmpty()) {
+                int wId = hotWarehouses.get(random.nextInt(hotWarehouses.size()));
                 modifyEntry.add("warehouse");
                 modifyEntry.add("w_id");
                 modifyEntry.add(String.valueOf(wId));
-            } else if (r <= numberOfWarehouses + numberOfDistricts) {
-                int index = r - numberOfWarehouses;
-                int index0 = index - 1;
-                int wId = (index0 / TPCCConfig.configDistPerWhse) + 1;
-                int dId = (index0 % TPCCConfig.configDistPerWhse) + 1;
-                modifyEntry.add("district");
-                modifyEntry.add("d_w_id,d_id");
-                modifyEntry.add(wId + "," + dId);
-            } else if (r <= numberOfWarehouses + numberOfDistricts + numberOfCustomers) {
-                int index = r - (numberOfWarehouses + numberOfDistricts);
-                int index0 = index - 1;
-                int districtIndex = index0 / TPCCConfig.configCustPerDist;
-                int cId = (index0 % TPCCConfig.configCustPerDist) + 1;
-                int wId = (districtIndex / TPCCConfig.configDistPerWhse) + 1;
-                int dId = (districtIndex % TPCCConfig.configDistPerWhse) + 1;
-                modifyEntry.add("customer");
-                modifyEntry.add("c_w_id,c_d_id,c_id");
-                modifyEntry.add(wId + "," + dId + "," + cId);
-            } else {
-                int index = r - (numberOfWarehouses + numberOfDistricts + numberOfCustomers);
-                int iId = index;
-                modifyEntry.add("item");
-                modifyEntry.add("i_id");
-                modifyEntry.add(String.valueOf(iId));
+            }
+            else {
+                int r = TPCCUtil.randomNumber(1, totalRecords, random);
+                if (r <= numberOfWarehouses) {
+                    int wId = r; //
+                    modifyEntry.add("warehouse");
+                    modifyEntry.add("w_id");
+                    modifyEntry.add(String.valueOf(wId));
+                } else if (r <= numberOfWarehouses + numberOfDistricts) {
+                    int index = r - numberOfWarehouses;
+                    int index0 = index - 1;
+                    int wId = (index0 / TPCCConfig.configDistPerWhse) + 1;
+                    int dId = (index0 % TPCCConfig.configDistPerWhse) + 1;
+                    modifyEntry.add("district");
+                    modifyEntry.add("d_w_id,d_id");
+                    modifyEntry.add(wId + "," + dId);
+                } else if (r <= numberOfWarehouses + numberOfDistricts + numberOfCustomers) {
+                    int index = r - (numberOfWarehouses + numberOfDistricts);
+                    int index0 = index - 1;
+                    int districtIndex = index0 / TPCCConfig.configCustPerDist;
+                    int cId = (index0 % TPCCConfig.configCustPerDist) + 1;
+                    int wId = (districtIndex / TPCCConfig.configDistPerWhse) + 1;
+                    int dId = (districtIndex % TPCCConfig.configDistPerWhse) + 1;
+                    modifyEntry.add("customer");
+                    modifyEntry.add("c_w_id,c_d_id,c_id");
+                    modifyEntry.add(wId + "," + dId + "," + cId);
+                } else {
+                    int index = r - (numberOfWarehouses + numberOfDistricts + numberOfCustomers);
+                    int iId = index;
+                    modifyEntry.add("item");
+                    modifyEntry.add("i_id");
+                    modifyEntry.add(String.valueOf(iId));
+                }
             }
 
             modifyLists.add(modifyEntry);
@@ -873,7 +886,7 @@ public class Performance {
     /* Should be thread safe*/
     private StoreServerRequest getStoreServerRequest() {
         int txChance = random.nextInt(100);
-        if (INTERACTIVE && txChance < 5) {
+        if (INTERACTIVE && txChance < INTERACTIVE_CHANCE) {
             return getStoreInteractiveRequest();
         }
         else {
@@ -976,15 +989,21 @@ public class Performance {
     }
 
     private StoreServerRequest getStoreInteractiveRequest() {
+
         List<String> copyHotItems = new ArrayList<>(hotItems);
         List<List<String>> modifyLists = new ArrayList<>();
         for (int i = 0; i < INTERACTIVE_RECORD_COUNT; i++) {
             List<String> modifyEntry = new ArrayList<>();
-            int randomIndex = random.nextInt(copyHotItems.size());
+            boolean hot = random.nextInt(100) < HOT_RECORD_SELECTION_CHANCE;
             modifyEntry.add("Items");
             modifyEntry.add("IId");
-            modifyEntry.add(copyHotItems.get(randomIndex));
-            copyHotItems.remove(randomIndex);
+            if (hot) {
+                int randomIndex = random.nextInt(copyHotItems.size());
+                modifyEntry.add(copyHotItems.get(randomIndex));
+                copyHotItems.remove(randomIndex);
+            }
+            else
+                modifyEntry.add(String.valueOf(random.nextInt(InitStoreBenchmark.NUM_OF_EACH_PLAYER_ITEMS * InitStoreBenchmark.NUM_OF_PLAYERS)));
 
             modifyLists.add(modifyEntry);
         }
@@ -1091,6 +1110,10 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
             log.info("request successful {}:{}", request.getType(),request.getValues());
+
+            if (request.getType() == TPCCServerRequest.Type.INTERACTIVE) {
+                stats.itemReadFinished();
+            }
         }
 
     }
@@ -1599,6 +1622,15 @@ public class Performance {
                 .metavar("TRANSACTIONMODE")
                 .help("Transaction execution mode. could be either \"interactive\" or \"storedProcedure\"");
 
+        parser.addArgument("--interactive-chance")
+                .action(store())
+                .required(false)
+                .setDefault(-1)
+                .type(Integer.class)
+                .dest("interactiveChance")
+                .metavar("INTERACTIVECHANCE")
+                .help("chance of selecting an \"interactive\" transaction");
+
 
 
         return parser;
@@ -1666,12 +1698,13 @@ public class Performance {
 
         private AtomicBoolean running;
         private long finished;
+        private int interactiveChance;
 
-        public Stats(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay) {
-            init(numRecords, reportingInterval, resultFilePath, metricsFilePath, recordSize, batchSize, interval, timeout, memory, hotRecords, hotChance, threads, mode, operationDelay);
+        public Stats(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay, int interactiveChance) {
+            init(numRecords, reportingInterval, resultFilePath, metricsFilePath, recordSize, batchSize, interval, timeout, memory, hotRecords, hotChance, threads, mode, operationDelay, interactiveChance);
         }
 
-        private void init(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay) {
+        private void init(long numRecords, int reportingInterval, String resultFilePath, String metricsFilePath, int recordSize, int batchSize, Double interval, int timeout, long memory, String hotRecords, int hotChance, int threads, String mode, int operationDelay, int interactiveChance) {
             this.start = System.currentTimeMillis();
             this.finished = System.currentTimeMillis();
             this.windowStart = System.currentTimeMillis();
@@ -1726,6 +1759,7 @@ public class Performance {
             this.sellRecordNum = new AtomicLong(0);
             this.sellHotRecordNum = new AtomicLong(0);
             this.itemCount = new AtomicLong(0);
+            this.interactiveChance = interactiveChance;
         }
 
         private void createResultCSVFiles(String resultFilePath) {
@@ -1736,7 +1770,7 @@ public class Performance {
 
                 // Check if the file already exists to avoid overwriting it
                 if (!Files.exists(path)) {
-                    String CSVHeader = "num of records, mode, operation_delay, hot_records, prob, threads, throughput(tx/s), item_read(tx/s), request_retried, total_retries, avg_retry_per_request, avg_latency, max_latency, 50th_latency, 95th_latency, 99th_latency, 99.9th_latency, useful_time, waited_time, wasted_time, io_time, locking_time, retiring_time, initiation_time, unlocking_time, committing_time, waiting_for_others_time, rolling_back_time\n";
+                    String CSVHeader = "num of records, mode, operation_delay, hot_records, prob, dynamic_chance, threads, throughput(tx/s), item_read(tx/s), request_retried, total_retries, avg_retry_per_request, avg_latency, max_latency, 50th_latency, 95th_latency, 99th_latency, 99.9th_latency, useful_time, waited_time, wasted_time, io_time, locking_time, retiring_time, initiation_time, unlocking_time, committing_time, waiting_for_others_time, rolling_back_time\n";
                     BufferedWriter out = new BufferedWriter(new FileWriter(resultFilePath));
 
                     // Writing the header to output stream
@@ -1869,12 +1903,13 @@ public class Performance {
 
             System.out.println("");
 
-            String resultCSV = String.format("%d,%s,%d,%s,%d,%d,%.2f,%.2f,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
+            String resultCSV = String.format("%d,%s,%d,%s,%d,%d,%d,%.2f,%.2f,%d,%d,%.2f,%.2f,%.2f,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d,%d\n",
                     count.get(),
                     mode,
                     operationDelay,
                     hotRecords,
                     hotChance,
+                    interactiveChance,
                     threads,
                     recsPerSec,
                     itemsPerSec,
