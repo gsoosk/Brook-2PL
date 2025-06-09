@@ -5,6 +5,7 @@ This repository provides two playbooks:
 * `deploy.yml`: deploys `server` and `benchmark` programs on the remote servers 
     * Runs RocksDb on each of the servers
 * `metric.yml`: deploys `prometheus` server on the specified server
+* `rocksdb_init.yml`: initializes the workloads on the server
 
 ## How to run a playbook using ansible
 ```bash
