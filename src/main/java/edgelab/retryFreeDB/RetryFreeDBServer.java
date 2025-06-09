@@ -23,6 +23,7 @@ import java.io.IOException;
 import java.sql.Connection;
 import java.sql.SQLException;
 import java.util.HashMap;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
@@ -135,6 +136,10 @@ public class RetryFreeDBServer {
             repo.initTransaction(transaction);
             transactions.put(transactionId, transaction);
 
+            if (this.mode.equals("occ")) {
+                transaction.OCCInitTransactions = new HashSet<>(transactions.values());
+            }
+
             transaction.finishInitiation(startTime);
 
             return transaction;
@@ -220,6 +225,9 @@ public class RetryFreeDBServer {
             tx.startLocking();
 
             try {
+//                if (Objects.equals(this.mode, "occ")) {
+//                    delayMicroseconds(10);
+//                }
                 repo.lock(tx,  toBeAbortedTransactions, request);
                 tx.finishLocking();
                 return Result.newBuilder().setStatus(true).setMessage("done").build();
@@ -447,6 +455,13 @@ public class RetryFreeDBServer {
             DBTransaction tx = transactions.get(transactionId.getId());
             return commitTransaction(tx);
         }
+        public static void delayMicroseconds(long micros) {
+            long startTime = System.nanoTime();
+            long endTime = startTime + (micros * 1000);
+            while (System.nanoTime() < endTime) {
+                // Busy-wait
+            }
+        }
 
         public Result commitTransaction(DBTransaction tx) {
 
@@ -456,6 +471,26 @@ public class RetryFreeDBServer {
             try {
                 tx.startCommitting();
                 repo.release(tx, toBeAbortedTransactions);
+
+                if(Objects.equals(this.mode, "occ")) {
+//                    Validation Phase
+                    boolean validated = OCCValidation(tx);
+//                    Write Phase
+                    if (validated) {
+                        OCCUpdate(tx);
+                        tx.OCCFinish();
+                    }
+                    else  {
+                        tx.finishCommitting();
+
+                        tx.setAbort();
+                        isTransactionInvalid(tx);
+                        return Result.newBuilder().setStatus(false).setMessage("Could not commit - occ validation failed - rollbacked").build();
+                    }
+
+                }
+
+
                 transactions.remove(tx.getTimestamp());
                 tx.finishCommitting();
                 log.warn("{}, Transaciton commited, total waiting time: {}", tx.getTimestamp(), tx.getWaitingTime());
@@ -475,6 +510,37 @@ public class RetryFreeDBServer {
             }
         }
 
+        private void OCCUpdate(DBTransaction tx) throws Exception {
+            for (String key : tx.getOCCWriteSet().keySet()) {
+                DBData data = tx.getOCCWriteSet().get(key);
+                this.repo.updateOCC(tx, data);
+            }
+        }
+
+        private boolean OCCValidation(DBTransaction tx) {
+
+            Set<DBTransaction> toCheck = new HashSet<>(this.transactions.values());
+            toCheck.addAll(tx.OCCInitTransactions);
+
+            for (DBTransaction other : toCheck) {
+                if (other != null && other.isOCCValidated()) {
+                    if (!Objects.equals(tx.getTimestamp(), other.getTimestamp())) {
+                        for (String key : other.getOCCWriteSet().keySet()) {
+                            if (!other.isOCCFinished() && tx.getOCCWriteSet().containsKey(key)) {
+                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+                                return false;
+                            }
+                            if (tx.getOCCReadSet().contains(key)) {
+                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            tx.OCCValidate();
+            return true;
+        }
 
         @Override
         public void rollBackTransaction(TransactionId transactionId, StreamObserver<Result> responseObserver) {

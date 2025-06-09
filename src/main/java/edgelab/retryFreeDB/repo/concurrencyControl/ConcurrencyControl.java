@@ -12,6 +12,7 @@ import edgelab.retryFreeDB.repo.storage.InMemoryRepo;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
 import lombok.extern.slf4j.Slf4j;
+import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 
 import java.sql.Connection;
@@ -32,12 +33,15 @@ public class ConcurrencyControl {
     private static boolean BAMBOO_ENABLE = true;
     private static final boolean SHARED_LOCK_ENABLE = true;
 
+    private static boolean OCC_ENABLE = false;
+
     public static void setMode(String mode) throws Exception {
         switch (mode) {
-            case "slw" -> {
+            case "slw", "ordered" -> {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = false;
                 ConcurrencyControl.SLW_ENABLE = true;
+                ConcurrencyControl.OCC_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = false;
                 DBLock.WOUND_WAIT_ENABLE = false;
                 DBLock.SLW_ENABLE = true;
@@ -46,6 +50,7 @@ public class ConcurrencyControl {
                 ConcurrencyControl.BAMBOO_ENABLE = false;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
                 ConcurrencyControl.SLW_ENABLE = false;
+                ConcurrencyControl.OCC_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = false;
                 DBLock.WOUND_WAIT_ENABLE = true;
                 DBLock.SLW_ENABLE = false;
@@ -54,8 +59,18 @@ public class ConcurrencyControl {
                 ConcurrencyControl.BAMBOO_ENABLE = true;
                 ConcurrencyControl.WOUND_WAIT_ENABLE = true;
                 ConcurrencyControl.SLW_ENABLE = false;
+                ConcurrencyControl.OCC_ENABLE = false;
                 DBLock.BAMBOO_ENABLE = true;
                 DBLock.WOUND_WAIT_ENABLE = true;
+                DBLock.SLW_ENABLE = false;
+            }
+            case "occ" -> {
+                ConcurrencyControl.BAMBOO_ENABLE = false;
+                ConcurrencyControl.WOUND_WAIT_ENABLE = false;
+                ConcurrencyControl.SLW_ENABLE = false;
+                ConcurrencyControl.OCC_ENABLE = true;
+                DBLock.BAMBOO_ENABLE = false;
+                DBLock.WOUND_WAIT_ENABLE = false;
                 DBLock.SLW_ENABLE = false;
             }
             default -> throw new Exception("This mode of 2pl is not supported by server");
@@ -107,6 +122,8 @@ public class ConcurrencyControl {
     private final ConcurrentHashMap<String, Set<String>> transactionResources = new ConcurrentHashMap<>();
 
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, LockData data) throws Exception {
+        if (OCC_ENABLE)
+            return;
         String resource = data.getResource();
         LockType lockType = LockType.WRITE;
         if (SHARED_LOCK_ENABLE)
@@ -114,6 +131,8 @@ public class ConcurrencyControl {
         lockLogic(tx, toBeAborted, resource, lockType);
     }
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, DBData data) throws Exception {
+        if (OCC_ENABLE)
+            return;
         String resource = getResource(data);
         LockType lockType = LockType.WRITE;
         if (SHARED_LOCK_ENABLE)
@@ -122,6 +141,8 @@ public class ConcurrencyControl {
     }
 
     private void lockLogic(DBTransaction tx, Set<DBTransaction> toBeAborted, String resource, LockType lockType) throws Exception {
+        if (OCC_ENABLE)
+            return;
         DBLock lock;
         log.info("{}, try to lock {}, <{}>", tx, resource, lockType);
         lock = locks.computeIfAbsent(resource, s -> new DBLock(s, false));
@@ -176,6 +197,9 @@ public class ConcurrencyControl {
     }
 
     public void tryLock(DBTransaction tx, DBData data) throws Exception {
+        if (OCC_ENABLE)
+            return;
+
         if (BAMBOO_ENABLE || WOUND_WAIT_ENABLE)
             throw new Exception("Brook2PL is not enabled!");
 
@@ -219,6 +243,9 @@ public class ConcurrencyControl {
     }
 
     public boolean waitDieLock(DBTransaction tx, String resource) throws Exception {
+        if (OCC_ENABLE)
+            return true;
+
         // this method orders transactions based on
         if (BAMBOO_ENABLE || WOUND_WAIT_ENABLE)
             throw new Exception("Brook2PL is not enabled!");
@@ -298,6 +325,8 @@ public class ConcurrencyControl {
     }
     
     public void atomicLock(DBTransaction tx, String tableName, List<String> values, Set<DBTransaction> toBeAborted) throws Exception {
+        if (OCC_ENABLE)
+            return;
         boolean allLocked = false;
         while (!allLocked) {
             for (int i = 0; i < values.size(); i++) {
@@ -370,7 +399,10 @@ public class ConcurrencyControl {
                             log.info("after holding transactons: {}", lock.getHoldingTransactions());
 //                        return;
                         }
+//                        T_i = TX , T_j = T
                     } else if (SLW_ENABLE) {
+//                        T_j->Dynamic
+//                        t(T_i) < t(T_j) -> T_i older than T_j, T_j is younger than T_i -> abort T_i
                         if (t.isInteractiveTransaction() && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) { // ww for interactive transactions
                             toBeAborted.add(t);
                             t.setAbort();
@@ -379,6 +411,8 @@ public class ConcurrencyControl {
                         else if (t.isInteractiveTransaction() && tx.isInteractiveTransaction()) {
                             continue;
                         }
+//                        T_i->Dynamic, T_j->Static
+//                        t(T_i) < t(T_j) -> T_i older than T_j -> abort T_i or T_j is younger than T_i
                         else if (tx.isInteractiveTransaction() && Long.parseLong(t.toString()) > Long.parseLong(tx.toString())) {
                             toBeAborted.add(tx);
                             tx.setAbort();
@@ -553,8 +587,10 @@ public class ConcurrencyControl {
     }
 
     public void unlockAll(DBTransaction tx, Set<DBTransaction> toBeAborted) {
+        if (OCC_ENABLE)
+            return;
 //        synchronized (locks) {
-            for (String resource : tx.getResources()) {
+        for (String resource : tx.getResources()) {
                 releaseLock(tx, resource, toBeAborted);
             }
             tx.clearResources();
@@ -677,6 +713,7 @@ public class ConcurrencyControl {
     public Map<String, String> get(DBTransaction tx, DBData data) throws Exception {
         String resource = getResource(data);
 
+
         long last = System.currentTimeMillis();
         if (keyValueRepository instanceof PostgresRepo) {
 //            synchronized (dirtyReads) {
@@ -691,30 +728,67 @@ public class ConcurrencyControl {
         }
 
 
-        Map<String, String> value = keyValueRepository.read(tx, data);
+        Map<String, String> value;
+
+        String key = data.getKey();
+        if (OCC_ENABLE && tx.getOCCWriteSet().containsKey(key)) {
+            if (tx.getOCCWriteSet().get(key) instanceof DBInsertData)
+                value = InMemoryRepo.getInsertDataMap((DBInsertData) data);
+            else if (tx.getOCCWriteSet().get(key) instanceof DBDeleteData)
+                throw new RocksDBException("does not exits");
+            else {
+                value = keyValueRepository.read(tx, data);
+                InMemoryRepo.updateValue((DBWriteData) data, value);
+            }
+        }
+        else
+            value = keyValueRepository.read(tx, data);
+
+        if (OCC_ENABLE)
+            tx.addOCCRead(key);
+
         delay(OPERATION_THINKING_TIME);
         return value;
     }
 
 
-
-
-
-
     public void insert(DBTransaction tx, DBInsertData d) throws Exception {
-        keyValueRepository.insert(tx, d);
+        if (OCC_ENABLE)
+            tx.addOCCWrite(InMemoryRepo.getInsertKey(d), d);
+        else
+            keyValueRepository.insert(tx, d);
     }
 
     public void update(DBTransaction tx, DBWriteData d) throws Exception {
-        keyValueRepository.write(tx, d);
+
+        if (OCC_ENABLE) {
+            String key = d.getKey();
+            tx.addOCCWrite(key, d);
+        }
+        else
+            keyValueRepository.write(tx, d);
     }
 
     public void remove(DBTransaction tx, DBDeleteData d) throws Exception {
-        keyValueRepository.remove(tx, d);
+        if (OCC_ENABLE) {
+            String key = d.getKey();
+            tx.addOCCWrite(key, d);
+        }
+        else
+            keyValueRepository.remove(tx, d);
     }
 
     public int lastId(String table) throws Exception {
         return keyValueRepository.lastId(table);
+    }
+
+    public void updateOCC(DBTransaction tx, DBData data) throws Exception {
+        if (data instanceof DBInsertData)
+            keyValueRepository.insert(tx, (DBInsertData) data);
+        else if (data instanceof DBDeleteData)
+            keyValueRepository.remove(tx, (DBDeleteData) data);
+        else if (data instanceof DBWriteData)
+            keyValueRepository.write(tx, (DBWriteData) data);
     }
 }
 

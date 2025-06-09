@@ -8,6 +8,7 @@ import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBDeleteData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBInsertData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBWriteData;
+import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.jgrapht.alg.util.Pair;
 import org.rocksdb.*;
@@ -124,8 +125,21 @@ public class InMemoryRepo implements KeyValueRepository{
     @Override
     public void insert(DBTransaction tx, DBInsertData data) throws Exception {
         log.info("{}: insert {}:{}",tx.getTimestamp(), data.getTable(), data.getRecordId());
-        String key = data.getTable() + ":" + data.getRecordId();
+        String key = getInsertKey(data);
 
+        Map<String, String> value = getInsertDataMap(data);
+
+        if (!data.getTable().equals("order_line") && !data.getTable().equals("new_order") && !data.getTable().equals("history") && !data.getTable().equals("oorder")) { // do not save orderline and neworder due to memory limit
+            inMemoryDB.put(key, value);
+            tx.appendWAL(key, null);
+        }
+    }
+
+    public static String getInsertKey(DBInsertData data) {
+        return data.getTable() + ":" + data.getRecordId();
+    }
+
+    public static Map<String, String> getInsertDataMap(DBInsertData data) {
         Map<String, String> value;
         if (data.getNewRecordData() != null && !data.getNewRecordData().isEmpty()) {
             value = data.getNewRecordData();
@@ -138,11 +152,7 @@ public class InMemoryRepo implements KeyValueRepository{
                 value.put(keys[i], record[i]);
             }
         }
-
-        if (!data.getTable().equals("order_line") && !data.getTable().equals("new_order") && !data.getTable().equals("history") && !data.getTable().equals("oorder")) { // do not save orderline and neworder due to memory limit
-            inMemoryDB.put(key, value);
-            tx.appendWAL(key, null);
-        }
+        return value;
     }
 
     @Override
@@ -165,18 +175,12 @@ public class InMemoryRepo implements KeyValueRepository{
 
             /* There is a logical lock on the key*/
             Map<String, String> value = inMemoryDB.get(key);
+
             if (value == null)
                 throw new RocksDBException("not existed");
             tx.appendWAL(key, value);
 
-            if (data.getMultiValue() != null && !data.getMultiValue().isEmpty()) {
-                value.putAll(data.getMultiValue());
-            }
-            else {
-                if (!value.containsKey(data.getVariable()))
-                    throw new RocksDBException("does not contain variable: " + data.getVariable());
-                value.put(data.getVariable(), data.getValue());
-            }
+            updateValue(data, value);
 
             inMemoryDB.put(key, value);
         } catch (RocksDBException e) {
@@ -184,6 +188,17 @@ public class InMemoryRepo implements KeyValueRepository{
             throw e;
         }
 
+    }
+
+    public static void updateValue(DBWriteData data, Map<String, String> value) throws RocksDBException {
+        if (data.getMultiValue() != null && !data.getMultiValue().isEmpty()) {
+            value.putAll(data.getMultiValue());
+        }
+        else {
+            if (!value.containsKey(data.getVariable()))
+                throw new RocksDBException("does not contain variable: " + data.getVariable());
+            value.put(data.getVariable(), data.getValue());
+        }
     }
 
 
