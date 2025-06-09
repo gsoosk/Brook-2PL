@@ -1,18 +1,13 @@
 package edgelab.retryFreeDB.repo.concurrencyControl;
 
 import edgelab.retryFreeDB.benchmark.Performance;
-import edgelab.retryFreeDB.benchmark.util.TPCCUtil;
+import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import lombok.Getter;
 import lombok.Setter;
-import org.jgrapht.alg.util.Pair;
 
 import java.sql.Connection;
-import java.util.ArrayList;
-import java.util.HashMap;
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
-import java.util.Random;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -74,6 +69,30 @@ public class DBTransaction {
 
     @Getter
     private final Map<String, Optional<Map<String, String>>> WAL;
+
+    @Getter
+    private final Set<String> OCCReadSet;
+    @Getter
+    private final Map<String, DBData> OCCWriteSet;
+
+
+    private final AtomicBoolean OCCValidated;
+    private final AtomicBoolean OCCFinished;
+    public Set<DBTransaction> OCCInitTransactions;
+    public void OCCValidate() {
+        OCCValidated.set(true);
+    }
+    public boolean isOCCValidated() {
+        return OCCValidated.get();
+    }
+
+    public void OCCFinish() {
+        OCCFinished.set(true);
+    }
+
+    public boolean isOCCFinished() {
+        return OCCFinished.get();
+    }
     public DBTransaction(String timestamp) {
 
         this.timestamp = timestamp;
@@ -89,6 +108,10 @@ public class DBTransaction {
         this.waitingForOthersTime = 0;
         this.rollingBackTime = 0;
         this.WAL = new ConcurrentHashMap<>();
+        this.OCCReadSet = ConcurrentHashMap.newKeySet();
+        this.OCCWriteSet = new ConcurrentHashMap<>();
+        this.OCCValidated = new AtomicBoolean(false);
+        this.OCCFinished = new AtomicBoolean(false);
         this.randomPriority = Performance.random.nextLong();
         this.startTime = System.nanoTime();
     }
@@ -216,5 +239,15 @@ public class DBTransaction {
 
     public boolean isDeadLock() {
         return System.nanoTime() - startTime > DEADLOCK_TIMEOUT;
+    }
+
+    public void addOCCRead(String key) {
+        this.OCCReadSet.add(key);
+    }
+
+
+    public void addOCCWrite(String key, DBData value) {
+        this.OCCReadSet.add(key);
+        this.OCCWriteSet.put(key, value);
     }
 }

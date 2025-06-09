@@ -52,9 +52,6 @@ import static net.sourceforge.argparse4j.impl.Arguments.append;
 
 @Slf4j
 public class Performance {
-
-
-
     private abstract class ServerRequest {
         @Getter
         protected long transactionId;
