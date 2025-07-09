@@ -5,6 +5,7 @@ import com.mxgraph.layout.mxIGraphLayout;
 import com.mxgraph.util.mxCellRenderer;
 import edgelab.retryFreeDB.slwGraph.nodes.LockNode;
 import edgelab.retryFreeDB.slwGraph.nodes.ReadNode;
+import edgelab.retryFreeDB.slwGraph.nodes.SCNode;
 import edgelab.retryFreeDB.slwGraph.nodes.TXNode;
 import edgelab.retryFreeDB.slwGraph.nodes.UnlockNode;
 import edgelab.retryFreeDB.slwGraph.nodes.UpdateNode;
@@ -13,7 +14,9 @@ import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.checkerframework.checker.units.qual.A;
 import org.jgrapht.Graph;
+import org.jgrapht.alg.cycle.CycleDetector;
 import org.jgrapht.alg.cycle.HawickJamesSimpleCycles;
+import org.jgrapht.alg.cycle.JohnsonSimpleCycles;
 import org.jgrapht.ext.JGraphXAdapter;
 import org.jgrapht.graph.DefaultEdge;
 import org.jgrapht.graph.SimpleDirectedGraph;
@@ -24,6 +27,7 @@ import java.awt.image.BufferedImage;
 import java.io.File;
 import java.io.IOException;
 import java.util.ArrayList;
+import java.util.Arrays;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -33,6 +37,11 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.function.Function;
 import java.util.function.Predicate;
 import java.util.stream.Collectors;
+
+import org.jgrapht.graph.SimpleGraph;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
 
 @Slf4j
 public class SLWGraph {
@@ -229,6 +238,103 @@ public class SLWGraph {
     public Boolean isThereADeadlock() {
         Graph<TXNode, DefaultEdge> graph = getGraphOfChains(this.chains);
         return doesGraphHasSLWCycle(graph);
+    }
+
+    public boolean isItSerializable() {
+        Graph<TXNode, SCEdge> graph = getSCGraphOfChains(this.chains);
+
+
+       return false;
+    }
+
+    static class SCEdge extends DefaultEdge {
+        enum Type {
+            S, C
+        }
+
+        private final Type type;
+
+        public SCEdge(Type type) {
+            this.type = type;
+        }
+
+        public Type getType() {
+            return type;
+        }
+    }
+
+    private Graph<TXNode, SCEdge> getSCGraphOfChains(List<List<TXNode>> chains) {
+        List<List<TXNode>> scChains = new ArrayList<>();
+        for (List<TXNode> chain: chains) {
+            List<TXNode> scChain = new ArrayList<>();
+            List<TXNode> duplicateChain = new ArrayList<>();
+            StringBuilder currentContent = new StringBuilder();
+            List<LockNode> locks = new ArrayList<>();
+            for (int i = 0; i < chain.size(); i++) {
+                currentContent.append(chain.get(i).toString() + "->");
+                if (chain.get(i) instanceof LockNode)
+                    locks.add((LockNode) chain.get(i));
+                else if (chain.get(i) instanceof UnlockNode) {
+                    if (i != chain.size() - 1 && chain.get(i+1) instanceof UnlockNode)
+                        continue;
+
+                    SCNode scNode = new SCNode();
+                    scNode.setContent(currentContent.toString());
+                    scNode.setLocks(locks);
+                    scChain.add(scNode);
+
+                    // Add a duplicate node to the duplicateChain
+                    SCNode duplicateNode = new SCNode();
+                    duplicateNode.setContent(currentContent.toString());
+                    duplicateNode.setLocks(new ArrayList<>(locks));
+                    duplicateChain.add(duplicateNode);
+
+                    currentContent.setLength(0); // clear
+                    locks = new ArrayList<>();
+                }
+            }
+            scChains.add(scChain);
+            scChains.add(duplicateChain);
+            // You can also add duplicateChain to another list if needed
+        }
+
+
+        Graph<TXNode, SCEdge> graph = new SimpleDirectedGraph<>(SCEdge.class);
+        for (List<TXNode> chain: scChains) {
+            for (TXNode node : chain) {
+                graph.addVertex(node);
+            }
+
+            for (int i = 0; i < chain.size() - 1; i++) {
+                graph.addEdge(chain.get(i), chain.get(i+1), new SCEdge(SCEdge.Type.S));
+                graph.addEdge(chain.get(i+1), chain.get(i), new SCEdge(SCEdge.Type.S));
+            }
+        }
+
+
+        for (List<TXNode> chain : scChains) {
+            for (TXNode node : chain) {
+                for (TXNode otherNode : graph.vertexSet()) {
+                        if (otherNode == node) continue;
+                        // Check for conflicting locks between node and otherNode
+                        if (node instanceof SCNode scNode1 && otherNode instanceof SCNode scNode2) {
+                            for (LockNode lock1 : scNode1.getLocks()) {
+                                for (LockNode lock2 : scNode2.getLocks()) {
+                                    if (lock1.getTableName().equals(lock2.getTableName()) &&
+                                        (lock1.getType() == LockNode.Type.EXCLUSIVE || lock2.getType() == LockNode.Type.EXCLUSIVE)) {
+                                        graph.addEdge(node, otherNode, new SCEdge(SCEdge.Type.C));
+                                        graph.addEdge(otherNode, node, new SCEdge(SCEdge.Type.C));
+                                    }
+                                }
+                        }
+                    }
+                }
+            }
+        }
+
+
+
+        return graph;
     }
 
     private static Boolean doesGraphHasSLWCycle(Graph<TXNode, DefaultEdge> graph) {
@@ -605,5 +711,88 @@ public class SLWGraph {
         return transactions.stream()
                 .map(chains -> releaseLocksEarlier(new ArrayList<>(chains), toReleaseLocksTable)).collect(Collectors.toList());
     }
+
+
+
+    public void loadChainsFromJson(String jsonTransactions) throws JSONException {
+        JSONArray txArray = new JSONArray(jsonTransactions);
+        for (int ti = 0; ti < txArray.length(); ti++) {
+            JSONObject txObj = txArray.getJSONObject(ti);
+            JSONArray stmts = txObj.getJSONArray("statements");
+
+            List<TXNode> chain = new ArrayList<>();
+            for (int si = 0; si < stmts.length(); si++) {
+                JSONObject s = stmts.getJSONObject(si);
+                String type = s.getString("type").toLowerCase();
+                String tbl = s.getString("table");
+                String key = s.optString("key", null);
+                boolean comm = s.optBoolean("commutative", false);
+                // helper to split comma‐list into set of IDs
+                Set<String> ids = key == null
+                        ? Set.of()
+                        : Arrays.stream(key.split("\\s*,\\s*")).collect(Collectors.toSet());
+
+                switch (type) {
+                    case "shared_lock": {
+                        LockNode lock = LockNode.builder()
+                                .tableName(tbl)
+                                .ids(new HashSet<>(ids))
+                                .type(LockNode.Type.SHARED)
+                                .build();
+                        chain.add(lock);
+                        break;
+                    }
+                    case "exclusive_lock": {
+                        LockNode lock = LockNode.builder()
+                                .tableName(tbl)
+                                .ids(new HashSet<>(ids))
+                                .type(LockNode.Type.EXCLUSIVE)
+                                .build();
+                        chain.add(lock);
+                        break;
+                    }
+                    case "read": {
+                        ReadNode r = new ReadNode(tbl, key);
+                        r.setCommutative(comm);
+                        // if an "output" field is present, treat as a dependence placeholder:
+                        if (s.has("output")) {
+                            r.setOutputName(s.getString("output"));
+                        }
+                        chain.add(r);
+                        break;
+                    }
+                    case "write":
+                    case "delete":
+                    case "insert": {
+                        WriteNode w = new WriteNode(tbl, key);
+                        w.setCommutative(comm);
+                        chain.add(w);
+                        break;
+                    }
+                    case "unlock": {
+                        UnlockNode u = UnlockNode.builder()
+                                .toUnlockTables(List.of(tbl))
+                                .build();
+                        // find the most recent LockNode on this table and make u depend on it
+                        for (int back = chain.size() - 1; back >= 0; back--) {
+                            TXNode n = chain.get(back);
+                            if (n instanceof LockNode ln && ln.getTableName().equals(tbl)) {
+                                u.addDependency(n);
+                                break;
+                            }
+                        }
+                        chain.add(u);
+                        break;
+                    }
+                    default:
+                        throw new IllegalArgumentException("Unknown statement type: " + type);
+                }
+            }
+
+            // add exactly in this order:
+            this.chains.add(chain);
+        }
+    }
+
 }
 

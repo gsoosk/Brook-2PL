@@ -1,0 +1,72 @@
+
+{
+  "transactionName": "newOrder",
+  "inputs": ["warehouseId", "districtId", "customerId", "orderLineCount", "allLocals", "itemIDs", "supplierWarehouseIDs", "orderQuantities", "txId"],
+  "statements": [
+    {
+      "type": "read",
+      "table": "customer",
+      "keys": ["warehouseId", "districtId", "customerId"],
+      "output": "C",
+      "commutative": false
+    },
+    {
+      "type": "read",
+      "table": "warehouse",
+      "keys": ["warehouseId"],
+      "output": "W",
+      "commutative": false
+    },
+    {
+      "type": "read",
+      "table": "district",
+      "keys": ["warehouseId", "districtId"],
+      "output": "D",
+      "commutative": false
+    },
+    {
+      "type": "write",
+      "table": "district",
+      "keys": ["warehouseId", "districtId"],
+      "commutative": false
+    },
+    {
+      "type": "insert",
+      "table": "oorder",
+      "keys": ["warehouseId", "districtId", "customerId", "orderLineCount", "allLocals"],
+      "commutative": true
+    },
+    {
+      "type": "insert",
+      "table": "new_order",
+      "keys": ["warehouseId", "districtId", "D.d_next_o_id"],
+      "commutative": true
+    },
+    {
+      "type": "read",
+      "table": "item",
+      "keys": ["itemIDs"],
+      "output": "I",
+      "commutative": false
+    },
+    {
+      "type": "read",
+      "table": "stock",
+      "keys": ["supplierWarehouseIDs", "itemIDs"],
+      "output": "S",
+      "commutative": false
+    },
+    {
+      "type": "insert",
+      "table": "order_line",
+      "keys": ["warehouseId", "districtId", "D.d_next_o_id", "itemIDs", "supplierWarehouseIDs", "orderQuantities"],
+      "commutative": true
+    },
+    {
+      "type": "write",
+      "table": "stock",
+      "keys": ["supplierWarehouseIDs", "itemIDs"],
+      "commutative": false
+    }
+  ]
+}
