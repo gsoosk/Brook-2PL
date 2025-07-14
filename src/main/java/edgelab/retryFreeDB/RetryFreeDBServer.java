@@ -517,7 +517,20 @@ public class RetryFreeDBServer {
             }
         }
 
+
+        private final Map<String, ReentrantLock> OCCValidationLockMap = new ConcurrentHashMap<>();
+        private void acquireLockOnOCCSets(DBTransaction tx) {
+            List<String> toLock = tx.getOCCtoLock();
+            for (String key : toLock) {
+                ReentrantLock lock = OCCValidationLockMap.computeIfAbsent(key, k -> new ReentrantLock());
+                lock.lock();
+            }
+        }
+
         private boolean OCCValidation(DBTransaction tx) {
+
+            acquireLockOnOCCSets(tx);
+            boolean isValid = true;
 
             Set<DBTransaction> toCheck = new HashSet<>(this.transactions.values());
             toCheck.addAll(tx.OCCInitTransactions);
@@ -527,20 +540,38 @@ public class RetryFreeDBServer {
                     if (!Objects.equals(tx.getTimestamp(), other.getTimestamp())) {
                         for (String key : other.getOCCWriteSet().keySet()) {
                             if (!other.isOCCFinished() && tx.getOCCWriteSet().containsKey(key)) {
+                                isValid = false;
                                 log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                return false;
+                                break;
                             }
                             if (tx.getOCCReadSet().contains(key)) {
+                                isValid = false;
                                 log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                return false;
+                                break;
                             }
                         }
                     }
                 }
+                if (!isValid) break;
             }
-            tx.OCCValidate();
-            return true;
+            if (isValid) {
+                tx.OCCValidate();
+            }
+
+            releaseLocksOnOCCSets(tx);
+            return isValid;
         }
+
+        private void releaseLocksOnOCCSets(DBTransaction tx) {
+            List<String> toUnlock = tx.getOCCtoLock();
+            for (String key : toUnlock) {
+                ReentrantLock lock = OCCValidationLockMap.get(key);
+                if (lock != null && lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
+        }
+
 
         @Override
         public void rollBackTransaction(TransactionId transactionId, StreamObserver<Result> responseObserver) {

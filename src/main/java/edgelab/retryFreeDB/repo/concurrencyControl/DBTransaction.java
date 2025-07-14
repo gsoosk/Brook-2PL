@@ -6,10 +6,14 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -74,6 +78,38 @@ public class DBTransaction {
     private final Set<String> OCCReadSet;
     @Getter
     private final Map<String, DBData> OCCWriteSet;
+
+    private List<String> OCCtoLock =  null;
+
+    public List<String> getOCCtoLock() {
+        if (this.OCCtoLock == null) {
+            Set<String> toLockSet = new HashSet<>(this.getOCCReadSet());
+            toLockSet.addAll(this.getOCCWriteSet().keySet());
+            this.OCCtoLock = new ArrayList<>(toLockSet);
+            this.OCCtoLock.sort(String::compareTo);
+        }
+        return this.OCCtoLock;
+    }
+
+    @Getter
+    private final ConcurrentLinkedQueue<DBTransaction> IC3DepQueue = new ConcurrentLinkedQueue<DBTransaction>();
+
+    @Getter
+    private final ConcurrentLinkedQueue<IC3Piece> IC3Pieces = new ConcurrentLinkedQueue<IC3Piece>();
+
+    @Setter
+    @Getter
+    private IC3Piece activeIC3Piece;
+
+    private final AtomicBoolean committed = new AtomicBoolean(false);
+
+    private void commit() {
+        committed.set(true);
+    }
+
+    public boolean isCommitted() {
+        return committed.get();
+    }
 
 
     private final AtomicBoolean OCCValidated;
@@ -217,6 +253,8 @@ public class DBTransaction {
     public void finishCommitting() {
         if (previousCommitStart != -1)
             this.committingTime += (System.nanoTime() - previousCommitStart);
+
+        commit();
     }
 
     public void finishWaitingForOthers() {
@@ -249,5 +287,9 @@ public class DBTransaction {
     public void addOCCWrite(String key, DBData value) {
         this.OCCReadSet.add(key);
         this.OCCWriteSet.put(key, value);
+    }
+
+    public void addIC3Piece(IC3Piece piece) {
+        this.IC3Pieces.add(piece);
     }
 }
