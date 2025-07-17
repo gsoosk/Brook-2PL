@@ -955,7 +955,7 @@ public class Performance {
 //                    pid = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
 //                }
 
-                    alreadyBoughtListing.add(lid);
+//                    alreadyBoughtListing.add(lid);
                     tx.put("PId", pid);
                     tx.put("LId", lid);
                     long sendStartMicro = System.nanoTime() / 1000;

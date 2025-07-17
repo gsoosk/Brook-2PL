@@ -2,12 +2,12 @@ package edgelab.retryFreeDB;
 
 import edgelab.proto.Config;
 import edgelab.proto.Data;
-import edgelab.proto.Empty;
 import edgelab.proto.LockData;
 import edgelab.proto.TransactionId;
 import edgelab.proto.Result;
 import edgelab.proto.RetryFreeDBServerGrpc;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
+import edgelab.retryFreeDB.repo.concurrencyControl.IC3Piece;
 import edgelab.retryFreeDB.repo.storage.DTO.DBData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBDeleteData;
 import edgelab.retryFreeDB.repo.storage.DTO.DBInsertData;
@@ -20,20 +20,15 @@ import io.grpc.stub.StreamObserver;
 import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
-import java.sql.Connection;
 import java.sql.SQLException;
-import java.util.HashMap;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ExecutorService;
-import java.util.concurrent.Executors;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.locks.ReentrantLock;
 
 @Slf4j
 public class RetryFreeDBServer {
@@ -80,11 +75,14 @@ public class RetryFreeDBServer {
         Set<DBTransaction> toBeAbortedTransactions = ConcurrentHashMap.newKeySet();
         ConcurrentHashMap<String, AtomicInteger> lastIdUsed = new ConcurrentHashMap<>();
         private final AtomicLong lastTransactionId;
+        private final AtomicLong lastRemovedTransaction;
         public RetryFreeDBService(String postgresAddress, String postgresPort, String[] tables) throws Exception {
             repo = new ConcurrencyControl(postgresAddress, postgresPort);
             transactions = new ConcurrentHashMap<>();
             interactiveTransactions = new ConcurrentHashMap<>();
             lastTransactionId =  new AtomicLong(0);
+            lastRemovedTransaction = new AtomicLong(0);
+
 
             for (String table :
                     tables) {
@@ -92,6 +90,122 @@ public class RetryFreeDBServer {
             }
             log.info("Table metadata initialization finished");
 
+        }
+
+
+        public void ic3PieceBegin(DBTransaction transaction, IC3Piece piece) throws Exception {
+            transaction.setActiveIC3Piece(piece);
+
+
+            if (piece.getConflicts().isEmpty())
+                return;
+
+            for (DBTransaction dependentTransaction : transaction.getIC3DepQueue()) {
+                boolean waitedForPiece = false;
+
+                for (IC3Piece dependentPiece : dependentTransaction.getIC3Pieces()) {
+                    if (piece.getConflicts().contains(dependentPiece.getPieceName())) {
+//                      wait for piece dependentPiece
+                        while (!dependentPiece.isCommitted() && !dependentPiece.isAborted()) {
+                            if (transaction.isAbort())
+                                throw new Exception("transaction already aborted");
+
+                            Thread.sleep(0, 1000);
+                        }
+                        waitedForPiece = true;
+                    }
+                }
+
+                if (!waitedForPiece) {
+//                    TODO: wait for transaction dependentTransaction
+                    while (!dependentTransaction.isCommitted() && !dependentTransaction.isAbort()) {
+                        if (transaction.isAbort())
+                            throw new Exception("transaction already aborted");
+                        Thread.sleep(0, 1000);
+                    }
+                }
+
+            }
+
+            piece.start();
+            // ready to execute
+        }
+
+
+        public boolean ic3PieceCommit(DBTransaction tx, IC3Piece piece) throws Exception {
+            tx.startCommitting();
+            acquireLockOnIC3Sets(piece);
+
+            boolean validated = IC3Validation(tx, piece);
+//                    Write Phase
+            if (validated) {
+                repo.updateIC3Piece(tx, piece);
+                piece.finish();
+                releaseLocksOnIC3Sets(piece);
+            }
+            else  {
+                tx.finishCommitting();
+                piece.finish();
+                releaseLocksOnIC3Sets(piece);
+                log.error("Could not commit piece  {}:{} - occ validation failed - rollbacked", tx.getTimestamp(), piece);
+                return false;
+            }
+
+            tx.finishCommitting();
+            return true;
+
+        }
+
+        private boolean IC3Validation(DBTransaction tx, IC3Piece piece) {
+            long from = tx.getTimestampValue();
+            long to = this.lastTransactionId.get();
+
+            for (long i = from + 1 ; i <= to ; i ++) {
+                if (!transactions.containsKey(Long.toString(i)))
+                    continue;
+
+                DBTransaction other = transactions.get(Long.toString(i));
+                if (Objects.equals(tx.getTimestamp(), other.getTimestamp()))
+                    continue;
+
+
+                for (IC3Piece otherPiece : other.getIC3Pieces()) {
+                    if (!otherPiece.isStarted())
+                        break;
+
+                    if (otherPiece.isOCCValidated()) {
+                        for (String key : otherPiece.getWriteSet().keySet()) {
+                            if (piece.getReadSet().contains(key)) {
+                                log.error("Could not validate tx:piece : {}:{}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, piece, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+                                return false;
+                            }
+                            if (!otherPiece.isFinished() && piece.getWriteSet().containsKey(key)) {
+                                log.error("Could not validate tx:piece : {}:{}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, piece, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+                                return false;
+                            }
+                        }
+                    }
+                }
+            }
+            piece.OCCValidate();
+            return true;
+        }
+
+        private void acquireLockOnIC3Sets(IC3Piece piece) {
+            List<String> toLock = piece.getToLock();
+            for (String key : toLock) {
+                ReentrantLock lock = OCCValidationLockMap.computeIfAbsent(key, k -> new ReentrantLock());
+                lock.lock();
+            }
+        }
+        private void releaseLocksOnIC3Sets(IC3Piece piece) {
+            List<String> toUnlock = piece.getToLock();
+            for (String key : toUnlock) {
+                ReentrantLock lock = OCCValidationLockMap.get(key);
+                if (lock != null && lock.isHeldByCurrentThread()) {
+                    lock.unlock();
+                }
+            }
         }
 
         @Override
@@ -122,7 +236,7 @@ public class RetryFreeDBServer {
             long startTime = System.nanoTime();
 
             String transactionId;
-            if ( request.getTransactionId().isEmpty())
+            if ( request.getTransactionId().isEmpty()  || this.mode.equals("occ")) // for occ we always increment
                 transactionId = String.valueOf(lastTransactionId.incrementAndGet());
             else
                 transactionId = request.getTransactionId();
@@ -135,11 +249,6 @@ public class RetryFreeDBServer {
 
             repo.initTransaction(transaction);
             transactions.put(transactionId, transaction);
-
-            if (this.mode.equals("occ")) {
-                transaction.OCCInitTransactions = new HashSet<>(transactions.values());
-            }
-
             transaction.finishInitiation(startTime);
 
             return transaction;
@@ -474,24 +583,34 @@ public class RetryFreeDBServer {
 
                 if(Objects.equals(this.mode, "occ")) {
 //                    Validation Phase
+                    acquireLockOnOCCSets(tx);
                     boolean validated = OCCValidation(tx);
 //                    Write Phase
                     if (validated) {
                         OCCUpdate(tx);
                         tx.OCCFinish();
+                        releaseLocksOnOCCSets(tx);
                     }
                     else  {
                         tx.finishCommitting();
-
                         tx.setAbort();
+
+                        releaseLocksOnOCCSets(tx);
                         isTransactionInvalid(tx);
                         return Result.newBuilder().setStatus(false).setMessage("Could not commit - occ validation failed - rollbacked").build();
                     }
 
                 }
+                else if (Objects.equals(this.mode, "ic3")) {
+
+                    IC3WaitForDependentTransactions(tx);
+                    IC3Update(tx);
+                    tx.commit();
+                }
 
 
-                transactions.remove(tx.getTimestamp());
+
+                removeTransaction(tx);
                 tx.finishCommitting();
                 log.warn("{}, Transaciton commited, total waiting time: {}", tx.getTimestamp(), tx.getWaitingTime());
                 return Result.newBuilder().setStatus(true)
@@ -506,8 +625,35 @@ public class RetryFreeDBServer {
                         .putReturns("rolling_back_time", String.valueOf(tx.getRollingBackTime()))
                         .setMessage("released").build();
             } catch (Exception e) {
-                return Result.newBuilder().setStatus(false).setMessage("Could not release the locks").build();
+                return Result.newBuilder().setStatus(false).setMessage("Could not release the locks/commit" + e.getMessage()).build();
             }
+        }
+
+        private void IC3Update(DBTransaction tx) throws Exception {
+            for (String key : tx.getOCCWriteSet().keySet()) {
+                DBData data = tx.getOCCWriteSet().get(key);
+                this.repo.updateIC3(tx, data, key);
+            }
+        }
+
+        private void IC3WaitForDependentTransactions(DBTransaction tx) throws Exception {
+            for (DBTransaction dependentTransaction : tx.getIC3DepQueue()) {
+                while (!dependentTransaction.isCommitted() && !dependentTransaction.isAbort()) {
+                    if (tx.isAbort())
+                        throw new Exception("transaction already aborted");
+                    Thread.sleep(0, 1000);
+                }
+
+            }
+        }
+
+
+        private void removeTransaction(DBTransaction tx) {
+//            We need to remove transactions in an ascending order for OCC to be able to validate with ts > t_current
+            if (Long.parseLong(tx.getTimestamp()) > 1000 + lastRemovedTransaction.get()) {
+                transactions.remove(Long.toString(lastRemovedTransaction.incrementAndGet()));
+            }
+
         }
 
         private void OCCUpdate(DBTransaction tx) throws Exception {
@@ -529,37 +675,31 @@ public class RetryFreeDBServer {
 
         private boolean OCCValidation(DBTransaction tx) {
 
-            acquireLockOnOCCSets(tx);
-            boolean isValid = true;
+            long from = tx.getTimestampValue();
+            long to = this.lastTransactionId.get();
 
-            Set<DBTransaction> toCheck = new HashSet<>(this.transactions.values());
-            toCheck.addAll(tx.OCCInitTransactions);
+            for (long i = from + 1 ; i <= to ; i ++) {
+                if (!transactions.containsKey(Long.toString(i)))
+                    continue;
 
-            for (DBTransaction other : toCheck) {
+                DBTransaction other = transactions.get(Long.toString(i));
                 if (other != null && other.isOCCValidated()) {
                     if (!Objects.equals(tx.getTimestamp(), other.getTimestamp())) {
                         for (String key : other.getOCCWriteSet().keySet()) {
-                            if (!other.isOCCFinished() && tx.getOCCWriteSet().containsKey(key)) {
-                                isValid = false;
-                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                break;
-                            }
                             if (tx.getOCCReadSet().contains(key)) {
-                                isValid = false;
                                 log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                break;
+                                return false;
+                            }
+                            if (!other.isOCCFinished() && tx.getOCCWriteSet().containsKey(key)) {
+                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+                                return false;
                             }
                         }
                     }
                 }
-                if (!isValid) break;
             }
-            if (isValid) {
-                tx.OCCValidate();
-            }
-
-            releaseLocksOnOCCSets(tx);
-            return isValid;
+            tx.OCCValidate();
+            return true;
         }
 
         private void releaseLocksOnOCCSets(DBTransaction tx) {
@@ -567,6 +707,13 @@ public class RetryFreeDBServer {
             for (String key : toUnlock) {
                 ReentrantLock lock = OCCValidationLockMap.get(key);
                 if (lock != null && lock.isHeldByCurrentThread()) {
+//                   OCCValidationLockMap.compute(key, (k, v) -> {
+//                        if (v != null && v.getHoldCount() == 1 && v.isHeldByCurrentThread()) {
+//                            return null;
+//                        }
+//                        return v;
+//                    });
+
                     lock.unlock();
                 }
             }

@@ -12,7 +12,6 @@ import edgelab.retryFreeDB.repo.storage.InMemoryRepo;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
 import lombok.extern.slf4j.Slf4j;
-import org.rocksdb.RocksDB;
 import org.rocksdb.RocksDBException;
 
 import java.sql.Connection;
@@ -34,6 +33,7 @@ public class ConcurrencyControl {
     private static final boolean SHARED_LOCK_ENABLE = true;
 
     private static boolean OCC_ENABLE = false;
+    private static boolean IC3_ENABLE = false;
 
     public static void setMode(String mode) throws Exception {
         switch (mode) {
@@ -73,6 +73,16 @@ public class ConcurrencyControl {
                 DBLock.WOUND_WAIT_ENABLE = false;
                 DBLock.SLW_ENABLE = false;
             }
+            case "ic3" -> {
+                ConcurrencyControl.BAMBOO_ENABLE = false;
+                ConcurrencyControl.WOUND_WAIT_ENABLE = false;
+                ConcurrencyControl.SLW_ENABLE = false;
+                ConcurrencyControl.OCC_ENABLE = false;
+                ConcurrencyControl.IC3_ENABLE = true;
+                DBLock.BAMBOO_ENABLE = false;
+                DBLock.WOUND_WAIT_ENABLE = false;
+                DBLock.SLW_ENABLE = false;
+            }
             default -> throw new Exception("This mode of 2pl is not supported by server");
         }
     }
@@ -90,6 +100,11 @@ public class ConcurrencyControl {
 
 
     private KeyValueRepository keyValueRepository;
+
+
+    private final Map<String, Map<String, String>> IC3StashDB = new ConcurrentHashMap<>();
+    private final Map<String, DBTransaction> IC3LastAccess = new ConcurrentHashMap<>(); // (T, "reader"/"writer)
+    private final Map<String, DBTransaction> IC3LastWriteAccess = new ConcurrentHashMap<>();
 
     public ConcurrencyControl(String addr, String port) throws RocksDBException {
         String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
@@ -122,7 +137,7 @@ public class ConcurrencyControl {
     private final ConcurrentHashMap<String, Set<String>> transactionResources = new ConcurrentHashMap<>();
 
     public void lock(DBTransaction tx, Set<DBTransaction> toBeAborted, LockData data) throws Exception {
-        if (OCC_ENABLE)
+        if (OCC_ENABLE || IC3_ENABLE)
             return;
         String resource = data.getResource();
         LockType lockType = LockType.WRITE;
@@ -587,7 +602,7 @@ public class ConcurrencyControl {
     }
 
     public void unlockAll(DBTransaction tx, Set<DBTransaction> toBeAborted) {
-        if (OCC_ENABLE)
+        if (OCC_ENABLE | IC3_ENABLE)
             return;
 //        synchronized (locks) {
         for (String resource : tx.getResources()) {
@@ -733,19 +748,38 @@ public class ConcurrencyControl {
         String key = data.getKey();
         if (OCC_ENABLE && tx.getOCCWriteSet().containsKey(key)) {
             if (tx.getOCCWriteSet().get(key) instanceof DBInsertData)
-                value = InMemoryRepo.getInsertDataMap((DBInsertData) data);
+                value = InMemoryRepo.getInsertDataMap((DBInsertData) tx.getOCCWriteSet().get(key));
             else if (tx.getOCCWriteSet().get(key) instanceof DBDeleteData)
                 throw new RocksDBException("does not exits");
             else {
                 value = keyValueRepository.read(tx, data);
-                InMemoryRepo.updateValue((DBWriteData) data, value);
+                InMemoryRepo.updateValue((DBWriteData) tx.getOCCWriteSet().get(key), value);
             }
+        }
+        else if (IC3_ENABLE && tx.getActiveIC3Piece().getWriteSet().containsKey(key)) { // Read from local piece
+            if (tx.getOCCWriteSet().get(key) instanceof DBInsertData)
+                value = InMemoryRepo.getInsertDataMap((DBInsertData) tx.getActiveIC3Piece().getWriteSet().get(key));
+            else if (tx.getOCCWriteSet().get(key) instanceof DBDeleteData)
+                throw new RocksDBException("does not exits");
+            else {
+                if (IC3StashDB.containsKey(key))
+                    value = IC3StashDB.get(key);
+                else
+                    value = keyValueRepository.read(tx, data);
+                InMemoryRepo.updateValue((DBWriteData) tx.getActiveIC3Piece().getWriteSet().get(key), value);
+            }
+        }
+        else if (IC3_ENABLE && IC3StashDB.containsKey(key)) { // Read from stash
+            log.info("{}: IC3: Read from stashed data", tx.getTimestamp());
+            value = IC3StashDB.get(key);
         }
         else
             value = keyValueRepository.read(tx, data);
 
         if (OCC_ENABLE)
             tx.addOCCRead(key);
+        else if (IC3_ENABLE)
+            tx.getActiveIC3Piece().addRead(key);
 
         delay(OPERATION_THINKING_TIME);
         return value;
@@ -755,6 +789,10 @@ public class ConcurrencyControl {
     public void insert(DBTransaction tx, DBInsertData d) throws Exception {
         if (OCC_ENABLE)
             tx.addOCCWrite(InMemoryRepo.getInsertKey(d), d);
+        else if (IC3_ENABLE) {
+            tx.addOCCWrite(InMemoryRepo.getInsertKey(d), d);
+            tx.getActiveIC3Piece().addWrite(InMemoryRepo.getInsertKey(d), d);
+        }
         else
             keyValueRepository.insert(tx, d);
     }
@@ -765,6 +803,10 @@ public class ConcurrencyControl {
             String key = d.getKey();
             tx.addOCCWrite(key, d);
         }
+        else if (IC3_ENABLE) {
+            tx.addOCCWrite(d.getKey(), d);
+            tx.getActiveIC3Piece().addWrite(d.getKey(), d);
+        }
         else
             keyValueRepository.write(tx, d);
     }
@@ -773,6 +815,10 @@ public class ConcurrencyControl {
         if (OCC_ENABLE) {
             String key = d.getKey();
             tx.addOCCWrite(key, d);
+        }
+        else if (IC3_ENABLE) {
+            tx.addOCCWrite(d.getKey(), d);
+            tx.getActiveIC3Piece().addWrite(d.getKey(), d);
         }
         else
             keyValueRepository.remove(tx, d);
@@ -789,6 +835,62 @@ public class ConcurrencyControl {
             keyValueRepository.remove(tx, (DBDeleteData) data);
         else if (data instanceof DBWriteData)
             keyValueRepository.write(tx, (DBWriteData) data);
+    }
+
+    public void updateIC3Piece(DBTransaction tx, IC3Piece piece) throws Exception {
+        for (String key : piece.getReadSet()) {
+
+            if (this.IC3LastWriteAccess.containsKey(key)) {
+                DBTransaction tw = this.IC3LastWriteAccess.get(key);
+                tx.addIC3Dependency(tw);
+            }
+
+            this.IC3LastAccess.put(key, tx);
+        }
+
+        for (String key : piece.getWriteSet().keySet()) {
+
+            if (this.IC3LastAccess.containsKey(key)) {
+                DBTransaction trw = this.IC3LastAccess.get(key);
+                tx.addIC3Dependency(trw);
+            }
+
+            this.IC3LastWriteAccess.put(key, tx);
+            this.IC3LastAccess.put(key, tx);
+            updateIC3Stash(tx, piece, key);
+
+        }
+    }
+
+    private void updateIC3Stash(DBTransaction tx, IC3Piece piece, String key) throws Exception {
+        if (piece.getWriteSet().get(key) instanceof DBInsertData data) {
+            log.info("{}: insert stash {}:{}", tx.getTimestamp(), data.getTable(), data.getRecordId());
+            Map<String, String> value = InMemoryRepo.getInsertDataMap(data);
+            if (!data.getTable().equals("order_line") && !data.getTable().equals("new_order") && !data.getTable().equals("history") && !data.getTable().equals("oorder")) { // do not save orderline and neworder due to memory limit
+                IC3StashDB.put(key, value);
+            }
+        }
+        else if (piece.getWriteSet().get(key) instanceof DBDeleteData) {
+            IC3StashDB.put(key, null);
+        }
+        else if (piece.getWriteSet().get(key) instanceof DBWriteData data) {
+            Map<String, String> value = keyValueRepository.read(tx, data);
+            InMemoryRepo.updateValue(data, value);
+            IC3StashDB.put(key, value);
+        }
+    }
+
+
+    public void updateIC3(DBTransaction tx, DBData data, String key) throws Exception {
+        updateOCC(tx, data);
+        if (IC3LastAccess.containsKey(key) && Objects.equals(IC3LastAccess.get(key).getTimestamp(), tx.getTimestamp())) {
+            IC3LastAccess.remove(key);
+        }
+        if (IC3LastWriteAccess.containsKey(key) && Objects.equals(IC3LastWriteAccess.get(key).getTimestamp(), tx.getTimestamp())) {
+            IC3LastWriteAccess.remove(key);
+        }
+
+
     }
 }
 

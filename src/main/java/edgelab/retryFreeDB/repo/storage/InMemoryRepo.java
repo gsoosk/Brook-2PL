@@ -56,6 +56,7 @@ public class InMemoryRepo implements KeyValueRepository{
                     partitions.get(index % numThreads).add(new Pair<>(keyBytes, valueBytes));
                     iterator.next();
                     index++;
+
                 }
 
                 System.out.println("Have read " + index + " entries from db");

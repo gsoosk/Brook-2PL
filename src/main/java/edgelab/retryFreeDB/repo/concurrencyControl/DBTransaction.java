@@ -94,6 +94,10 @@ public class DBTransaction {
     @Getter
     private final ConcurrentLinkedQueue<DBTransaction> IC3DepQueue = new ConcurrentLinkedQueue<DBTransaction>();
 
+    public void addIC3Dependency(DBTransaction tx) {
+        IC3DepQueue.add(tx);
+    }
+
     @Getter
     private final ConcurrentLinkedQueue<IC3Piece> IC3Pieces = new ConcurrentLinkedQueue<IC3Piece>();
 
@@ -103,7 +107,7 @@ public class DBTransaction {
 
     private final AtomicBoolean committed = new AtomicBoolean(false);
 
-    private void commit() {
+    public void commit() {
         committed.set(true);
     }
 
