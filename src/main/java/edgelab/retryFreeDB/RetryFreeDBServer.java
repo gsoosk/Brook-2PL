@@ -94,65 +94,78 @@ public class RetryFreeDBServer {
 
 
         public void ic3PieceBegin(DBTransaction transaction, IC3Piece piece) throws Exception {
-            transaction.setActiveIC3Piece(piece);
+            try {
+                transaction.setActiveIC3Piece(piece);
 
 
-            if (piece.getConflicts().isEmpty())
-                return;
+                if (piece.getConflicts().isEmpty())
+                    return;
 
-            for (DBTransaction dependentTransaction : transaction.getIC3DepQueue()) {
-                boolean waitedForPiece = false;
+                for (DBTransaction dependentTransaction : transaction.getIC3DepQueue()) {
+                    boolean waitedForPiece = false;
 
-                for (IC3Piece dependentPiece : dependentTransaction.getIC3Pieces()) {
-                    if (piece.getConflicts().contains(dependentPiece.getPieceName())) {
+                    for (IC3Piece dependentPiece : dependentTransaction.getIC3Pieces()) {
+                        if (piece.getConflicts().contains(dependentPiece.getPieceName())) {
 //                      wait for piece dependentPiece
-                        while (!dependentPiece.isCommitted() && !dependentPiece.isAborted()) {
+                            while (!dependentPiece.isCommitted() && !dependentPiece.isAborted()) {
+                                if (transaction.isAbort())
+                                    throw new Exception("transaction already aborted");
+
+                                Thread.sleep(0, 1000);
+                            }
+                            waitedForPiece = true;
+                        }
+                    }
+
+                    if (!waitedForPiece) {
+//                    TODO: wait for transaction dependentTransaction
+                        while (!dependentTransaction.isCommitted() && !dependentTransaction.isAbort()) {
                             if (transaction.isAbort())
                                 throw new Exception("transaction already aborted");
-
                             Thread.sleep(0, 1000);
                         }
-                        waitedForPiece = true;
                     }
+
                 }
 
-                if (!waitedForPiece) {
-//                    TODO: wait for transaction dependentTransaction
-                    while (!dependentTransaction.isCommitted() && !dependentTransaction.isAbort()) {
-                        if (transaction.isAbort())
-                            throw new Exception("transaction already aborted");
-                        Thread.sleep(0, 1000);
-                    }
-                }
-
+                piece.start();
+                // ready to execute
             }
-
-            piece.start();
-            // ready to execute
+            catch (Exception e) {
+                e.printStackTrace();
+                throw new RuntimeException(e);
+            }
         }
 
 
         public boolean ic3PieceCommit(DBTransaction tx, IC3Piece piece) throws Exception {
-            tx.startCommitting();
-            acquireLockOnIC3Sets(piece);
+            try {
+                tx.startCommitting();
+                acquireLockOnIC3Sets(piece);
 
-            boolean validated = IC3Validation(tx, piece);
+                boolean validated = IC3Validation(tx, piece);
 //                    Write Phase
-            if (validated) {
-                repo.updateIC3Piece(tx, piece);
-                piece.finish();
-                releaseLocksOnIC3Sets(piece);
-            }
-            else  {
-                tx.finishCommitting();
-                piece.finish();
-                releaseLocksOnIC3Sets(piece);
-                log.error("Could not commit piece  {}:{} - occ validation failed - rollbacked", tx.getTimestamp(), piece);
-                return false;
-            }
+                if (validated) {
+                    repo.updateIC3Piece(tx, piece);
+                    piece.finish();
+                    releaseLocksOnIC3Sets(piece);
+                } else {
+                    tx.finishCommitting();
+                    piece.finish();
+                    releaseLocksOnIC3Sets(piece);
+                    log.error("Could not commit piece  {}:{} - occ validation failed - rollbacked", tx.getTimestamp(), piece);
+                    return false;
+                }
 
-            tx.finishCommitting();
-            return true;
+                tx.finishCommitting();
+                return true;
+            }
+            catch (Exception e) {
+                tx.finishCommitting();
+                releaseLocksOnIC3Sets(piece);
+                e.printStackTrace();
+                throw e;
+            }
 
         }
 
@@ -165,6 +178,9 @@ public class RetryFreeDBServer {
                     continue;
 
                 DBTransaction other = transactions.get(Long.toString(i));
+                if (other == null)
+                    continue;
+
                 if (Objects.equals(tx.getTimestamp(), other.getTimestamp()))
                     continue;
 
@@ -191,17 +207,18 @@ public class RetryFreeDBServer {
             return true;
         }
 
+        private final Map<String, ReentrantLock> IC3ValidationLockMap = new ConcurrentHashMap<>();
         private void acquireLockOnIC3Sets(IC3Piece piece) {
             List<String> toLock = piece.getToLock();
             for (String key : toLock) {
-                ReentrantLock lock = OCCValidationLockMap.computeIfAbsent(key, k -> new ReentrantLock());
+                ReentrantLock lock = IC3ValidationLockMap.computeIfAbsent(key, k -> new ReentrantLock());
                 lock.lock();
             }
         }
         private void releaseLocksOnIC3Sets(IC3Piece piece) {
             List<String> toUnlock = piece.getToLock();
             for (String key : toUnlock) {
-                ReentrantLock lock = OCCValidationLockMap.get(key);
+                ReentrantLock lock = IC3ValidationLockMap.get(key);
                 if (lock != null && lock.isHeldByCurrentThread()) {
                     lock.unlock();
                 }
@@ -650,7 +667,7 @@ public class RetryFreeDBServer {
 
         private void removeTransaction(DBTransaction tx) {
 //            We need to remove transactions in an ascending order for OCC to be able to validate with ts > t_current
-            if (Long.parseLong(tx.getTimestamp()) > 1000 + lastRemovedTransaction.get()) {
+            if (Long.parseLong(tx.getTimestamp()) > 10000 + lastRemovedTransaction.get()) {
                 transactions.remove(Long.toString(lastRemovedTransaction.incrementAndGet()));
             }
 

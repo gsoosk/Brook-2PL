@@ -12,17 +12,22 @@ import edgelab.retryFreeDB.repo.storage.InMemoryRepo;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
 import lombok.extern.slf4j.Slf4j;
+import org.checkerframework.checker.units.qual.A;
+import org.jgrapht.alg.util.Pair;
 import org.rocksdb.RocksDBException;
 
 import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
+import java.util.ArrayList;
+import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 
 @Slf4j
 public class ConcurrencyControl {
@@ -103,8 +108,7 @@ public class ConcurrencyControl {
 
 
     private final Map<String, Map<String, String>> IC3StashDB = new ConcurrentHashMap<>();
-    private final Map<String, DBTransaction> IC3LastAccess = new ConcurrentHashMap<>(); // (T, "reader"/"writer)
-    private final Map<String, DBTransaction> IC3LastWriteAccess = new ConcurrentHashMap<>();
+    private final Map<String, List< Pair<DBTransaction, String>> > IC3LastAccess = new ConcurrentHashMap<>(); // k: [(T, "reader"/"writer),...]
 
     public ConcurrencyControl(String addr, String port) throws RocksDBException {
         String url = "jdbc:postgresql://" + addr + ":" + port + "/postgres";
@@ -766,12 +770,17 @@ public class ConcurrencyControl {
                     value = IC3StashDB.get(key);
                 else
                     value = keyValueRepository.read(tx, data);
+
+                if (value.isEmpty())
+                    throw new RocksDBException("does not exits");
                 InMemoryRepo.updateValue((DBWriteData) tx.getActiveIC3Piece().getWriteSet().get(key), value);
             }
         }
         else if (IC3_ENABLE && IC3StashDB.containsKey(key)) { // Read from stash
             log.info("{}: IC3: Read from stashed data", tx.getTimestamp());
             value = IC3StashDB.get(key);
+            if (value.isEmpty())
+                throw new RocksDBException("does not exits");
         }
         else
             value = keyValueRepository.read(tx, data);
@@ -780,6 +789,8 @@ public class ConcurrencyControl {
             tx.addOCCRead(key);
         else if (IC3_ENABLE)
             tx.getActiveIC3Piece().addRead(key);
+
+
 
         delay(OPERATION_THINKING_TIME);
         return value;
@@ -839,27 +850,37 @@ public class ConcurrencyControl {
 
     public void updateIC3Piece(DBTransaction tx, IC3Piece piece) throws Exception {
         for (String key : piece.getReadSet()) {
+            this.IC3LastAccess.computeIfAbsent(key, k -> new ArrayList<>());
 
-            if (this.IC3LastWriteAccess.containsKey(key)) {
-                DBTransaction tw = this.IC3LastWriteAccess.get(key);
-                tx.addIC3Dependency(tw);
+            if (!this.IC3LastAccess.get(key).isEmpty()) {
+                DBTransaction tw = getLastWriteAccess(this.IC3LastAccess.get(key));
+                if (tw != null)
+                    tx.addIC3Dependency(tw);
             }
-
-            this.IC3LastAccess.put(key, tx);
+            this.IC3LastAccess.get(key).add(new Pair<>(tx, "reader"));
         }
 
         for (String key : piece.getWriteSet().keySet()) {
+            this.IC3LastAccess.computeIfAbsent(key, k -> new ArrayList<>());
 
-            if (this.IC3LastAccess.containsKey(key)) {
-                DBTransaction trw = this.IC3LastAccess.get(key);
+            if (!this.IC3LastAccess.get(key).isEmpty()) {
+                DBTransaction trw = this.IC3LastAccess.get(key).get(this.IC3LastAccess.get(key).size() - 1).getFirst();
                 tx.addIC3Dependency(trw);
             }
 
-            this.IC3LastWriteAccess.put(key, tx);
-            this.IC3LastAccess.put(key, tx);
+            this.IC3LastAccess.get(key).add(new Pair<>(tx, "writer"));
             updateIC3Stash(tx, piece, key);
-
         }
+    }
+
+    private DBTransaction getLastWriteAccess(List<Pair<DBTransaction, String>> pairs) {
+        for (int i = pairs.size() - 1; i >= 0; i--) {
+            if (pairs.get(i).getSecond().equals("writer")) {
+                return pairs.get(i).getFirst();
+            }
+        }
+
+        return null;
     }
 
     private void updateIC3Stash(DBTransaction tx, IC3Piece piece, String key) throws Exception {
@@ -871,7 +892,7 @@ public class ConcurrencyControl {
             }
         }
         else if (piece.getWriteSet().get(key) instanceof DBDeleteData) {
-            IC3StashDB.put(key, null);
+            IC3StashDB.put(key, new HashMap<>());
         }
         else if (piece.getWriteSet().get(key) instanceof DBWriteData data) {
             Map<String, String> value = keyValueRepository.read(tx, data);
@@ -883,14 +904,27 @@ public class ConcurrencyControl {
 
     public void updateIC3(DBTransaction tx, DBData data, String key) throws Exception {
         updateOCC(tx, data);
-        if (IC3LastAccess.containsKey(key) && Objects.equals(IC3LastAccess.get(key).getTimestamp(), tx.getTimestamp())) {
-            IC3LastAccess.remove(key);
-        }
-        if (IC3LastWriteAccess.containsKey(key) && Objects.equals(IC3LastWriteAccess.get(key).getTimestamp(), tx.getTimestamp())) {
-            IC3LastWriteAccess.remove(key);
-        }
+        this.IC3LastAccess.computeIfAbsent(key, k -> new ArrayList<>());
+        removeFromAccessList(tx, IC3LastAccess.get(key));
+    }
 
+    private static void removeFromAccessList(DBTransaction tx, List<Pair<DBTransaction, String>> pairs) {
+        boolean removedReader = false;
+        boolean removedWriter = false;
 
+        for (int i = pairs.size() - 1; i >= 0; i--) {
+            if (!removedWriter && pairs.get(i).getFirst().equals(tx) && pairs.get(i).getSecond().equals("writer")) {
+                pairs.remove(i);
+                removedWriter = true;
+            }
+            else if (!removedReader && pairs.get(i).getFirst().equals(tx) && pairs.get(i).getSecond().equals("reader")) {
+                pairs.remove(i);
+                removedReader = true;
+            }
+
+            if (removedWriter && removedReader)
+                break;
+        }
     }
 }
 
