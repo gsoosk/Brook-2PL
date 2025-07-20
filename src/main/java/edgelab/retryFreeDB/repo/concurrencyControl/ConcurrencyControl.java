@@ -20,6 +20,7 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
+import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,6 +29,7 @@ import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
 public class ConcurrencyControl {
@@ -726,10 +728,14 @@ public class ConcurrencyControl {
     }
 
 
-
+    private final Map<String, AtomicInteger> OCCVersion = new ConcurrentHashMap<>();
 
 
     public Map<String, String> get(DBTransaction tx, DBData data) throws Exception {
+
+
+
+
         String resource = getResource(data);
 
 
@@ -750,6 +756,11 @@ public class ConcurrencyControl {
         Map<String, String> value;
 
         String key = data.getKey();
+
+        if (OCC_ENABLE || IC3_ENABLE)
+            OCCVersion.computeIfAbsent(key, k -> new AtomicInteger(0));
+
+
         if (OCC_ENABLE && tx.getOCCWriteSet().containsKey(key)) {
             if (tx.getOCCWriteSet().get(key) instanceof DBInsertData)
                 value = InMemoryRepo.getInsertDataMap((DBInsertData) tx.getOCCWriteSet().get(key));
@@ -785,10 +796,12 @@ public class ConcurrencyControl {
         else
             value = keyValueRepository.read(tx, data);
 
-        if (OCC_ENABLE)
-            tx.addOCCRead(key);
-        else if (IC3_ENABLE)
-            tx.getActiveIC3Piece().addRead(key);
+        if (OCC_ENABLE || IC3_ENABLE) {
+            tx.addOCCRead(key, this.OCCVersion.get(key).get());
+        }
+        if (IC3_ENABLE) {
+            tx.getActiveIC3Piece().addRead(key, OCCVersion.get(key).get());
+        }
 
 
 
@@ -798,11 +811,16 @@ public class ConcurrencyControl {
 
 
     public void insert(DBTransaction tx, DBInsertData d) throws Exception {
+        String key = InMemoryRepo.getInsertKey(d);
+
+        if (OCC_ENABLE || IC3_ENABLE)
+            OCCVersion.computeIfAbsent(key, k -> new AtomicInteger(0));
+
         if (OCC_ENABLE)
-            tx.addOCCWrite(InMemoryRepo.getInsertKey(d), d);
+            tx.addOCCWrite(key, d, this.OCCVersion.get(key).get());
         else if (IC3_ENABLE) {
-            tx.addOCCWrite(InMemoryRepo.getInsertKey(d), d);
-            tx.getActiveIC3Piece().addWrite(InMemoryRepo.getInsertKey(d), d);
+            tx.addOCCWrite(key, d, this.OCCVersion.get(key).get());
+            tx.getActiveIC3Piece().addWrite(key, d);
         }
         else
             keyValueRepository.insert(tx, d);
@@ -810,25 +828,31 @@ public class ConcurrencyControl {
 
     public void update(DBTransaction tx, DBWriteData d) throws Exception {
 
+        String key = d.getKey();
+        if (OCC_ENABLE || IC3_ENABLE)
+            OCCVersion.computeIfAbsent(key, k -> new AtomicInteger(0));
+
         if (OCC_ENABLE) {
-            String key = d.getKey();
-            tx.addOCCWrite(key, d);
+            tx.addOCCWrite(key, d, this.OCCVersion.get(key).get());
         }
         else if (IC3_ENABLE) {
-            tx.addOCCWrite(d.getKey(), d);
-            tx.getActiveIC3Piece().addWrite(d.getKey(), d);
+            tx.addOCCWrite(key, d, this.OCCVersion.get(key).get());
+            tx.getActiveIC3Piece().addWrite(key, d);
         }
         else
             keyValueRepository.write(tx, d);
     }
 
     public void remove(DBTransaction tx, DBDeleteData d) throws Exception {
+        String key = d.getKey();
+        if (OCC_ENABLE || IC3_ENABLE)
+            OCCVersion.computeIfAbsent(key, k -> new AtomicInteger(0));
+
         if (OCC_ENABLE) {
-            String key = d.getKey();
-            tx.addOCCWrite(key, d);
+            tx.addOCCWrite(key, d, this.OCCVersion.get(key).get());
         }
         else if (IC3_ENABLE) {
-            tx.addOCCWrite(d.getKey(), d);
+            tx.addOCCWrite(key, d, this.OCCVersion.get(key).get());
             tx.getActiveIC3Piece().addWrite(d.getKey(), d);
         }
         else
@@ -840,42 +864,71 @@ public class ConcurrencyControl {
     }
 
     public void updateOCC(DBTransaction tx, DBData data) throws Exception {
+        if (!OCC_ENABLE && !IC3_ENABLE)
+            return;
+
+        if (OCC_ENABLE) {
+            String key = data instanceof DBInsertData ? InMemoryRepo.getInsertKey((DBInsertData) data) : data.getKey();
+            this.OCCVersion.computeIfAbsent(key, k -> new AtomicInteger());
+            int v = this.OCCVersion.get(key).incrementAndGet();
+        }
+
+
         if (data instanceof DBInsertData)
             keyValueRepository.insert(tx, (DBInsertData) data);
         else if (data instanceof DBDeleteData)
             keyValueRepository.remove(tx, (DBDeleteData) data);
         else if (data instanceof DBWriteData)
             keyValueRepository.write(tx, (DBWriteData) data);
+
     }
 
     public void updateIC3Piece(DBTransaction tx, IC3Piece piece) throws Exception {
         for (String key : piece.getReadSet()) {
-            this.IC3LastAccess.computeIfAbsent(key, k -> new ArrayList<>());
+            this.IC3LastAccess.computeIfAbsent(key, k ->  new ArrayList<>());
+            List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
 
-            if (!this.IC3LastAccess.get(key).isEmpty()) {
-                DBTransaction tw = getLastWriteAccess(this.IC3LastAccess.get(key));
-                if (tw != null)
-                    tx.addIC3Dependency(tw);
+            synchronized (accList) {
+                if (!accList.isEmpty()) {
+                    DBTransaction tw = getLastWriteAccess(accList, tx);
+
+                    if (tw != null)
+                        tx.addIC3Dependency(tw);
+                }
+                accList.add(new Pair<>(tx, "reader"));
             }
-            this.IC3LastAccess.get(key).add(new Pair<>(tx, "reader"));
         }
 
         for (String key : piece.getWriteSet().keySet()) {
-            this.IC3LastAccess.computeIfAbsent(key, k -> new ArrayList<>());
+            this.IC3LastAccess.computeIfAbsent(key, k ->  new ArrayList<>());
+            List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
+            synchronized (accList) {
+                if (!accList.isEmpty()) {
+                    DBTransaction trw = getLastReadOrWriteAccess(accList, tx);
+                    if (trw != null)
+                        tx.addIC3Dependency(trw);
+                }
 
-            if (!this.IC3LastAccess.get(key).isEmpty()) {
-                DBTransaction trw = this.IC3LastAccess.get(key).get(this.IC3LastAccess.get(key).size() - 1).getFirst();
-                tx.addIC3Dependency(trw);
+                accList.add(new Pair<>(tx, "writer"));
             }
 
-            this.IC3LastAccess.get(key).add(new Pair<>(tx, "writer"));
             updateIC3Stash(tx, piece, key);
         }
     }
 
-    private DBTransaction getLastWriteAccess(List<Pair<DBTransaction, String>> pairs) {
+    private DBTransaction getLastReadOrWriteAccess(List<Pair<DBTransaction, String>> pairs, DBTransaction tx) {
         for (int i = pairs.size() - 1; i >= 0; i--) {
-            if (pairs.get(i).getSecond().equals("writer")) {
+            if (!Objects.equals(pairs.get(i).getFirst().getTimestamp(), tx.getTimestamp())) {
+                return pairs.get(i).getFirst();
+            }
+        }
+
+        return null;
+    }
+
+    private DBTransaction getLastWriteAccess(List<Pair<DBTransaction, String>> pairs, DBTransaction tx) {
+        for (int i = pairs.size() - 1; i >= 0; i--) {
+            if (pairs.get(i).getSecond().equals("writer") && !Objects.equals(pairs.get(i).getFirst().getTimestamp(), tx.getTimestamp())) {
                 return pairs.get(i).getFirst();
             }
         }
@@ -884,6 +937,11 @@ public class ConcurrencyControl {
     }
 
     private void updateIC3Stash(DBTransaction tx, IC3Piece piece, String key) throws Exception {
+        if (IC3_ENABLE) {
+            this.OCCVersion.computeIfAbsent(key, k -> new AtomicInteger());
+            this.OCCVersion.get(key).incrementAndGet();
+        }
+
         if (piece.getWriteSet().get(key) instanceof DBInsertData data) {
             log.info("{}: insert stash {}:{}", tx.getTimestamp(), data.getTable(), data.getRecordId());
             Map<String, String> value = InMemoryRepo.getInsertDataMap(data);
@@ -904,27 +962,25 @@ public class ConcurrencyControl {
 
     public void updateIC3(DBTransaction tx, DBData data, String key) throws Exception {
         updateOCC(tx, data);
-        this.IC3LastAccess.computeIfAbsent(key, k -> new ArrayList<>());
-        removeFromAccessList(tx, IC3LastAccess.get(key));
+        this.IC3LastAccess.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>()));
+        List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
+        synchronized (accList) {
+            removeFromAccessList(tx, accList);
+        }
     }
 
-    private static void removeFromAccessList(DBTransaction tx, List<Pair<DBTransaction, String>> pairs) {
-        boolean removedReader = false;
-        boolean removedWriter = false;
-
-        for (int i = pairs.size() - 1; i >= 0; i--) {
-            if (!removedWriter && pairs.get(i).getFirst().equals(tx) && pairs.get(i).getSecond().equals("writer")) {
-                pairs.remove(i);
-                removedWriter = true;
+    private static List<Pair<DBTransaction, String>> removeFromAccessList(DBTransaction tx, List<Pair<DBTransaction, String>> pairs) {
+        synchronized (pairs) {
+            for (int i = pairs.size() - 1; i >= 0; i--) {
+                if (pairs.get(i).getFirst().equals(tx))
+                    pairs.remove(i);
             }
-            else if (!removedReader && pairs.get(i).getFirst().equals(tx) && pairs.get(i).getSecond().equals("reader")) {
-                pairs.remove(i);
-                removedReader = true;
-            }
-
-            if (removedWriter && removedReader)
-                break;
         }
+        return pairs;
+    }
+
+    public int getOCCVersion(String key) {
+        return this.OCCVersion.get(key).get();
     }
 }
 

@@ -15,7 +15,6 @@ import java.util.concurrent.atomic.AtomicBoolean;
 public class IC3Piece {
 
 
-
     @Getter
     private final AtomicBoolean started = new AtomicBoolean(false);
 
@@ -75,20 +74,23 @@ public class IC3Piece {
         return committed.get();
     }
 
-        @Getter
-        private final AtomicBoolean aborted = new AtomicBoolean(false);
+    @Getter
+    private final AtomicBoolean aborted = new AtomicBoolean(false);
 
-        public void abort() {
-            aborted.set(true);
-        }
+    public void abort() {
+        aborted.set(true);
+    }
 
-        public boolean isAborted() {
-            return aborted.get();
-        }
+    public boolean isAborted() {
+        return aborted.get();
+    }
 
 
+    @Getter
+    private long transactionId;
 
-    public IC3Piece(Set<String> conflicts, String name) {
+
+    public IC3Piece(Set<String> conflicts, String name, long txId) {
         this.readSet = ConcurrentHashMap.newKeySet();
         this.writeSet = new ConcurrentHashMap<>();
 
@@ -96,7 +98,7 @@ public class IC3Piece {
         this.conflicts.addAll(conflicts);
 
         this.pieceName = name;
-
+        this.transactionId = txId;
     }
 
     private List<String> toLock = null;
@@ -111,15 +113,35 @@ public class IC3Piece {
         return this.toLock;
     }
 
-    public void addRead(String key) {
+    public void addRead(String key, int version) {
+        this.OCCVersions.putIfAbsent(key, version);
         this.readSet.add(key);
     }
 
 
     public void addWrite(String key, DBData value) {
-        this.readSet.add(key);
         this.writeSet.put(key, value);
     }
 
 
+    public void reset() {
+        this.readSet.clear();
+        this.writeSet.clear();
+        this.OCCVersions.clear();
+        this.started.set(false);
+        this.finished.set(false);
+        this.OCCValidated.set(false);
+        this.committed.set(false);
+    }
+
+    @Setter
+    @Getter
+    private long timestamp;
+    @Getter
+    private final ConcurrentHashMap<String, Integer> OCCVersions = new ConcurrentHashMap<>();
+
+
+    public int getOCCReadVersion(String key) {
+        return OCCVersions.get(key);
+    }
 }

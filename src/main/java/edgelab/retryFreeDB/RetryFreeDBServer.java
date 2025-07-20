@@ -21,11 +21,13 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.sql.SQLException;
+import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -70,6 +72,7 @@ public class RetryFreeDBServer {
         private final ConcurrencyControl repo;
         private String mode = "";
         ConcurrentHashMap<String, DBTransaction> transactions;
+        ConcurrentHashMap<String, DBTransaction> activeTransactions = new ConcurrentHashMap<>();
         ConcurrentHashMap<String, DBTransaction> interactiveTransactions;
 //        Bamboo:
         Set<DBTransaction> toBeAbortedTransactions = ConcurrentHashMap.newKeySet();
@@ -93,8 +96,16 @@ public class RetryFreeDBServer {
         }
 
 
+        private final AtomicLong lastIC3PieceId = new AtomicLong(0);
+        private Map<Long, IC3Piece> allIC3Pieces = new ConcurrentHashMap<>();
+        private final AtomicLong lastRemovedIC3Piece = new AtomicLong(0);
+
         public void ic3PieceBegin(DBTransaction transaction, IC3Piece piece) throws Exception {
             try {
+                piece.reset();
+                piece.setTimestamp(lastIC3PieceId.incrementAndGet());
+                allIC3Pieces.put(piece.getTimestamp(), piece);
+
                 transaction.setActiveIC3Piece(piece);
 
 
@@ -143,15 +154,16 @@ public class RetryFreeDBServer {
                 tx.startCommitting();
                 acquireLockOnIC3Sets(piece);
 
-                boolean validated = IC3Validation(tx, piece);
+                boolean validated = IC3Validation(piece);
 //                    Write Phase
                 if (validated) {
                     repo.updateIC3Piece(tx, piece);
                     piece.finish();
                     releaseLocksOnIC3Sets(piece);
+                    removeIC3Piece(piece);
                 } else {
                     tx.finishCommitting();
-                    piece.finish();
+//                    allIC3Pieces.remove(piece.getTimestamp());
                     releaseLocksOnIC3Sets(piece);
                     log.error("Could not commit piece  {}:{} - occ validation failed - rollbacked", tx.getTimestamp(), piece);
                     return false;
@@ -167,42 +179,63 @@ public class RetryFreeDBServer {
                 throw e;
             }
 
+
+
+        }
+        private void removeIC3Piece(IC3Piece piece) {
+//            We need to remove transactions in an ascending order for OCC to be able to validate with ts > t_current
+            if (piece.getTimestamp() > 10000 + lastRemovedIC3Piece.get()) {
+                transactions.remove(Long.toString(lastRemovedIC3Piece.incrementAndGet()));
+            }
+
         }
 
-        private boolean IC3Validation(DBTransaction tx, IC3Piece piece) {
-            long from = tx.getTimestampValue();
-            long to = this.lastTransactionId.get();
+        private boolean IC3Validation(IC3Piece piece) {
 
-            for (long i = from + 1 ; i <= to ; i ++) {
-                if (!transactions.containsKey(Long.toString(i)))
-                    continue;
-
-                DBTransaction other = transactions.get(Long.toString(i));
-                if (other == null)
-                    continue;
-
-                if (Objects.equals(tx.getTimestamp(), other.getTimestamp()))
-                    continue;
-
-
-                for (IC3Piece otherPiece : other.getIC3Pieces()) {
-                    if (!otherPiece.isStarted())
-                        break;
-
-                    if (otherPiece.isOCCValidated()) {
-                        for (String key : otherPiece.getWriteSet().keySet()) {
-                            if (piece.getReadSet().contains(key)) {
-                                log.error("Could not validate tx:piece : {}:{}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, piece, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                return false;
-                            }
-                            if (!otherPiece.isFinished() && piece.getWriteSet().containsKey(key)) {
-                                log.error("Could not validate tx:piece : {}:{}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, piece, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                return false;
-                            }
-                        }
-                    }
+            for (String key : piece.getReadSet()) {
+                int currVersion = piece.getOCCReadVersion(key);
+                int pieceVersion = this.repo.getOCCVersion(key);
+                if (pieceVersion != currVersion) {
+//                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+                    log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", piece, piece.getReadSet(), piece.getWriteSet(), key);
+                    return false;
                 }
             }
+
+
+
+//            long from = piece.getTimestamp();
+//            long to = this.lastIC3PieceId.get();
+
+//            for (long i = from + 1 ; i <= to ; i ++) {
+//                if (!allIC3Pieces.containsKey(i))
+//                    continue;
+//
+//                IC3Piece other = allIC3Pieces.get(i);
+//                if (other == null)
+//                    continue;
+//
+//                if (piece.getTimestamp() == other.getTimestamp() || piece.getTransactionId() == other.getTransactionId())
+//                    continue;
+//
+//
+//                if (!other.isStarted())
+//                    continue;
+//
+//                if (other.isOCCValidated()) {
+//                    for (String key : other.getWriteSet().keySet()) {
+//                        if (piece.getReadSet().contains(key)) {
+//                            log.error("Could not validate tx:piece : <{}:{}>, because of other tx:piece <{}:{}>,  Conflict on read key: {}", piece.getTransactionId(), piece.getTimestamp(), other.getTransactionId(), other.getTimestamp(),  key);
+//                            return false;
+//                        }
+//                        if (!other.isFinished() && piece.getWriteSet().containsKey(key)) {
+//                            log.error("Could not validate tx:piece : <{}:{}>, because of other tx:piece <{}:{}>,. Conflict on write key: {}", piece.getTransactionId(), piece.getTimestamp(), other.getTransactionId(), other.getTimestamp(),  key);
+//                            return false;
+//                        }
+//                    }
+//                }
+
+//            }
             piece.OCCValidate();
             return true;
         }
@@ -253,7 +286,7 @@ public class RetryFreeDBServer {
             long startTime = System.nanoTime();
 
             String transactionId;
-            if ( request.getTransactionId().isEmpty()  || this.mode.equals("occ")) // for occ we always increment
+            if ( request.getTransactionId().isEmpty()  || this.mode.equals("occ") || this.mode.equals("ic3")) // for occ we always increment
                 transactionId = String.valueOf(lastTransactionId.incrementAndGet());
             else
                 transactionId = request.getTransactionId();
@@ -266,7 +299,14 @@ public class RetryFreeDBServer {
 
             repo.initTransaction(transaction);
             transactions.put(transactionId, transaction);
+            activeTransactions.put(transactionId, transaction);
+
+            if (this.mode.equals("occ") || this.mode.equals("ic3"))
+                transaction.getInitOCCActiveTransactions().addAll(activeTransactions.keySet());
+
             transaction.finishInitiation(startTime);
+
+
 
             return transaction;
         }
@@ -305,6 +345,7 @@ public class RetryFreeDBServer {
             try {
                 repo.rollback(tx, toBeAbortedTransactions);
                 transactions.remove(tx.getTimestamp());
+                activeTransactions.remove(tx.getTimestamp());
                 log.warn("{}, Transaciton rollbacked", tx);
             } catch (Exception e) {
                 log.error("Could not abort the transaction {}:{}", tx, e);
@@ -500,8 +541,9 @@ public class RetryFreeDBServer {
                     repo.update(tx, (DBWriteData) d);
                 else if(d instanceof DBInsertData)
                     repo.insert(tx, (DBInsertData) d);
-                else
+                else {
                     return Result.newBuilder().putAllReturns(repo.get(tx, d)).setStatus(true).setMessage("done").build();
+                }
                 return Result.newBuilder().setStatus(true).setMessage("done").build();
             }
             catch (Exception ex) {
@@ -622,13 +664,14 @@ public class RetryFreeDBServer {
 
                     IC3WaitForDependentTransactions(tx);
                     IC3Update(tx);
-                    tx.commit();
                 }
 
 
 
                 removeTransaction(tx);
+                activeTransactions.remove(tx.getTimestamp());
                 tx.finishCommitting();
+                tx.commit();
                 log.warn("{}, Transaciton commited, total waiting time: {}", tx.getTimestamp(), tx.getWaitingTime());
                 return Result.newBuilder().setStatus(true)
                         .putReturns("waiting_time", String.valueOf(tx.getWaitingTime()))
@@ -642,6 +685,7 @@ public class RetryFreeDBServer {
                         .putReturns("rolling_back_time", String.valueOf(tx.getRollingBackTime()))
                         .setMessage("released").build();
             } catch (Exception e) {
+                e.printStackTrace();
                 return Result.newBuilder().setStatus(false).setMessage("Could not release the locks/commit" + e.getMessage()).build();
             }
         }
@@ -655,11 +699,13 @@ public class RetryFreeDBServer {
 
         private void IC3WaitForDependentTransactions(DBTransaction tx) throws Exception {
             for (DBTransaction dependentTransaction : tx.getIC3DepQueue()) {
+                log.info("{}: waiting for :{}", tx.getTimestamp(), dependentTransaction.getTimestamp());
                 while (!dependentTransaction.isCommitted() && !dependentTransaction.isAbort()) {
                     if (tx.isAbort())
                         throw new Exception("transaction already aborted");
                     Thread.sleep(0, 1000);
                 }
+                log.info("{}: finish waiting :{}", tx.getTimestamp(), dependentTransaction.getTimestamp());
 
             }
         }
@@ -692,29 +738,44 @@ public class RetryFreeDBServer {
 
         private boolean OCCValidation(DBTransaction tx) {
 
-            long from = tx.getTimestampValue();
-            long to = this.lastTransactionId.get();
-
-            for (long i = from + 1 ; i <= to ; i ++) {
-                if (!transactions.containsKey(Long.toString(i)))
-                    continue;
-
-                DBTransaction other = transactions.get(Long.toString(i));
-                if (other != null && other.isOCCValidated()) {
-                    if (!Objects.equals(tx.getTimestamp(), other.getTimestamp())) {
-                        for (String key : other.getOCCWriteSet().keySet()) {
-                            if (tx.getOCCReadSet().contains(key)) {
-                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                return false;
-                            }
-                            if (!other.isOCCFinished() && tx.getOCCWriteSet().containsKey(key)) {
-                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
-                                return false;
-                            }
-                        }
-                    }
+            // validation with version
+            for (String key : tx.getOCCReadSet()) {
+                if (tx.getOCCReadVersion(key) != this.repo.getOCCVersion(key)) {
+                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+                    log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), key);
+                    return false;
                 }
             }
+//            Set<String> transactionsToCheck = new HashSet<>(tx.getInitOCCActiveTransactions());
+//
+//            long from = tx.getTimestampValue();
+//            long to = this.lastTransactionId.get();
+//
+//            for (long i = from ; i <= to ; i ++) {
+//                transactionsToCheck.add(Long.toString(i));
+//            }
+//
+
+//            for (String i : transactionsToCheck) {
+//                if (!transactions.containsKey(i))
+//                    continue;
+//
+//                DBTransaction other = transactions.get(i);
+//                if (other != null && other.isOCCValidated()) {
+//                    if (!Objects.equals(tx.getTimestamp(), other.getTimestamp())) {
+//                        for (String key : other.getOCCWriteSet().keySet()) {
+//                            if (tx.getOCCReadSet().contains(key)) {
+//                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+//                                return false;
+//                            }
+//                            if (!other.isOCCFinished() && tx.getOCCWriteSet().containsKey(key)) {
+//                                log.error("Could not validate tx : {}, {} | {} because of other tx :{},  {} | {}. Conflict on write key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), other, other.getOCCReadSet(), other.getOCCWriteSet(), key);
+//                                return false;
+//                            }
+//                        }
+//                    }
+//                }
+//            }
             tx.OCCValidate();
             return true;
         }
@@ -724,13 +785,6 @@ public class RetryFreeDBServer {
             for (String key : toUnlock) {
                 ReentrantLock lock = OCCValidationLockMap.get(key);
                 if (lock != null && lock.isHeldByCurrentThread()) {
-//                   OCCValidationLockMap.compute(key, (k, v) -> {
-//                        if (v != null && v.getHoldCount() == 1 && v.isHeldByCurrentThread()) {
-//                            return null;
-//                        }
-//                        return v;
-//                    });
-
                     lock.unlock();
                 }
             }

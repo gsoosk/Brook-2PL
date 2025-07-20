@@ -7,6 +7,7 @@ import lombok.Setter;
 
 import java.sql.Connection;
 import java.util.ArrayList;
+import java.util.Enumeration;
 import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
@@ -92,7 +93,7 @@ public class DBTransaction {
     }
 
     @Getter
-    private final ConcurrentLinkedQueue<DBTransaction> IC3DepQueue = new ConcurrentLinkedQueue<DBTransaction>();
+    private final Set<DBTransaction> IC3DepQueue = ConcurrentHashMap.newKeySet();
 
     public void addIC3Dependency(DBTransaction tx) {
         IC3DepQueue.add(tx);
@@ -257,8 +258,6 @@ public class DBTransaction {
     public void finishCommitting() {
         if (previousCommitStart != -1)
             this.committingTime += (System.nanoTime() - previousCommitStart);
-
-        commit();
     }
 
     public void finishWaitingForOthers() {
@@ -283,17 +282,37 @@ public class DBTransaction {
         return System.nanoTime() - startTime > DEADLOCK_TIMEOUT;
     }
 
-    public void addOCCRead(String key) {
+    public void addOCCRead(String key, int version) {
+        this.OCCVersions.putIfAbsent(key, version);
         this.OCCReadSet.add(key);
     }
 
 
-    public void addOCCWrite(String key, DBData value) {
-        this.OCCReadSet.add(key);
+    public void addOCCWrite(String key, DBData value, int version) {
+//        this.OCCReadSet.add(key);
         this.OCCWriteSet.put(key, value);
     }
 
     public void addIC3Piece(IC3Piece piece) {
         this.IC3Pieces.add(piece);
+    }
+
+
+
+
+
+
+   @Getter
+   @Setter
+    public Set<String> initOCCActiveTransactions = ConcurrentHashMap.newKeySet();
+
+
+    @Getter
+    private final ConcurrentHashMap<String, Integer> OCCVersions = new ConcurrentHashMap<>();
+
+
+
+    public int getOCCReadVersion(String key) {
+        return OCCVersions.get(key);
     }
 }

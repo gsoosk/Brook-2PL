@@ -1475,71 +1475,55 @@ public class StoredProcedureClient extends Client{
 //                write(dbTransaction, "Items", "IId", "1000", x);
 
                 IC3Piece piece1 = new IC3Piece(Set.of(
-                        "buyListing:p1"
-                ), "addListing:p1");
+                        "buyListing:p1",
+                        "addListing:p1"
+                ), "addListing:p1", dbTransaction.getTimestampValue());
                 dbTransaction.addIC3Piece(piece1);
 
-                IC3Piece piece2 = new IC3Piece(Set.of(
-                        "buyListing:p1"
-                ), "addListing:p2");
-                dbTransaction.addIC3Piece(piece2);
-
-                IC3Piece piece3 = new IC3Piece(Set.of(
-                        "buyListing:p1",
-                        "addListing:p3"
-                ), "addListing:p3");
-                dbTransaction.addIC3Piece(piece3);
 
 
-                Map<String, String> item = null;
+
+                String listingRecordId = null;
 
                 boolean piece1Res = false;
+                int retry = 0;
                 while (!piece1Res) {
+                    if (retry > 10) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
                     dbService.ic3PieceBegin(dbTransaction, piece1);
-                    item = read(dbTransaction, "Items", "IId", IId);
-                    piece1Res = dbService.ic3PieceCommit(dbTransaction, piece1);
-                }
+                    Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
 
+                    if (item.isEmpty()) {
+                        log.info("Item does not exists!");
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        commit(dbTransaction);
+                        return res;
+                    }
 
-                if (item.isEmpty()) {
-                    log.info("Item does not exists!");
-                    dbService.ic3PieceCommit(dbTransaction, piece1);
-                    commit(dbTransaction);
-                    return res;
-                }
+                    if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
+                        log.info("item has a different owner! {}<>{}", item.get("IOwner"), PId);
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        commit(dbTransaction);
+                        return res;
+                    }
 
+                    Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+                    //            Check player exists
+                    if (player.isEmpty()) {
+                        log.info("player does not exists!");
+                        commit(dbTransaction);
+                        return res;
+                    }
 
-                if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
-                    log.info("item has a different owner! {}<>{}", item.get("IOwner"), PId);
-                    commit(dbTransaction);
-                    return res;
-                }
-
-
-                Map<String, String> player = null;
-                boolean piece2Res = false;
-                while (!piece2Res) {
-                    dbService.ic3PieceBegin(dbTransaction, piece2);
-                    player = read(dbTransaction, "Players", "PId", PId);
-                    piece2Res = dbService.ic3PieceCommit(dbTransaction, piece2);
-                }
-
-//            Check player exists
-                if (player.isEmpty()) {
-                    log.info("player does not exists!");
-                    commit(dbTransaction);
-                    return res;
-                }
-
-
-                boolean piece3Res = false;
-                String listingRecordId = null;
-                while (!piece3Res) {
-                    dbService.ic3PieceBegin(dbTransaction, piece3);
                     Result insertListingResult = insertLock(dbTransaction, "Listings");
                     listingRecordId = insertListingResult.getMessage();
                     insert(dbTransaction, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
-                    piece3Res = dbService.ic3PieceCommit(dbTransaction, piece3);
+
+
+                    piece1Res = dbService.ic3PieceCommit(dbTransaction, piece1);
+                    retry++;
                 }
 
 
@@ -2053,16 +2037,23 @@ public class StoredProcedureClient extends Client{
 
                 IC3Piece piece1 = new IC3Piece(Set.of(
                         "addListing:p1",
-                        "addListing:p2",
-                        "addListing:p3",
                         "buyListing:p1"
-                ), "buyListing:p1");
+                ), "buyListing:p1", dbTransaction.getTimestampValue());
                 dbTransaction.addIC3Piece(piece1);
 //                TODO: implement grpc call
 
                 boolean p1Result = false;
-                while (!p1Result)
+                int retry = 0;
+                while (!p1Result) {
+                    if (retry > 10)
+                    {
+                        rollback(dbTransaction);
+                        return res;
+                    }
                     p1Result = runBuyListingIC3Piece(PId, LId, dbTransaction, piece1, res);
+                    retry++;
+
+                }
 
                 getCommitResult(dbTransaction, res);
 
