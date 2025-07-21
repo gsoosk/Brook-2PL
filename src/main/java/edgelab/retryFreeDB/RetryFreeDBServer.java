@@ -21,13 +21,11 @@ import lombok.extern.slf4j.Slf4j;
 
 import java.io.IOException;
 import java.sql.SQLException;
-import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.locks.ReentrantLock;
@@ -102,6 +100,7 @@ public class RetryFreeDBServer {
 
         public void ic3PieceBegin(DBTransaction transaction, IC3Piece piece) throws Exception {
             try {
+                long startTime = System.nanoTime();
                 piece.reset();
                 piece.setTimestamp(lastIC3PieceId.incrementAndGet());
                 allIC3Pieces.put(piece.getTimestamp(), piece);
@@ -112,6 +111,7 @@ public class RetryFreeDBServer {
                 if (piece.getConflicts().isEmpty())
                     return;
 
+                transaction.startWaiting();
                 for (DBTransaction dependentTransaction : transaction.getIC3DepQueue()) {
                     boolean waitedForPiece = false;
 
@@ -138,8 +138,10 @@ public class RetryFreeDBServer {
                     }
 
                 }
+                transaction.wakesUp();
 
                 piece.start();
+                transaction.finishInitiation(startTime);
                 // ready to execute
             }
             catch (Exception e) {
@@ -240,18 +242,17 @@ public class RetryFreeDBServer {
             return true;
         }
 
-        private final Map<String, ReentrantLock> IC3ValidationLockMap = new ConcurrentHashMap<>();
         private void acquireLockOnIC3Sets(IC3Piece piece) {
             List<String> toLock = piece.getToLock();
             for (String key : toLock) {
-                ReentrantLock lock = IC3ValidationLockMap.computeIfAbsent(key, k -> new ReentrantLock());
+                ReentrantLock lock = OCCValidationLockMap.computeIfAbsent(key, k -> new ReentrantLock());
                 lock.lock();
             }
         }
         private void releaseLocksOnIC3Sets(IC3Piece piece) {
             List<String> toUnlock = piece.getToLock();
             for (String key : toUnlock) {
-                ReentrantLock lock = IC3ValidationLockMap.get(key);
+                ReentrantLock lock = OCCValidationLockMap.get(key);
                 if (lock != null && lock.isHeldByCurrentThread()) {
                     lock.unlock();
                 }
@@ -301,7 +302,7 @@ public class RetryFreeDBServer {
             transactions.put(transactionId, transaction);
             activeTransactions.put(transactionId, transaction);
 
-            if (this.mode.equals("occ") || this.mode.equals("ic3"))
+            if (this.mode.equals("occ"))
                 transaction.getInitOCCActiveTransactions().addAll(activeTransactions.keySet());
 
             transaction.finishInitiation(startTime);
@@ -661,9 +662,12 @@ public class RetryFreeDBServer {
 
                 }
                 else if (Objects.equals(this.mode, "ic3")) {
-
                     IC3WaitForDependentTransactions(tx);
                     IC3Update(tx);
+
+                    acquireLockOnOCCSets(tx); // lock to change the access list for the keys!
+                    this.repo.clearIC3AccessList(tx);
+                    releaseLocksOnOCCSets(tx);
                 }
 
 
@@ -698,6 +702,7 @@ public class RetryFreeDBServer {
         }
 
         private void IC3WaitForDependentTransactions(DBTransaction tx) throws Exception {
+            tx.startWaiting();
             for (DBTransaction dependentTransaction : tx.getIC3DepQueue()) {
                 log.info("{}: waiting for :{}", tx.getTimestamp(), dependentTransaction.getTimestamp());
                 while (!dependentTransaction.isCommitted() && !dependentTransaction.isAbort()) {
@@ -706,8 +711,8 @@ public class RetryFreeDBServer {
                     Thread.sleep(0, 1000);
                 }
                 log.info("{}: finish waiting :{}", tx.getTimestamp(), dependentTransaction.getTimestamp());
-
             }
+            tx.wakesUp();
         }
 
 
@@ -740,8 +745,10 @@ public class RetryFreeDBServer {
 
             // validation with version
             for (String key : tx.getOCCReadSet()) {
+                int currVersion = this.repo.getOCCVersion(key);
+                int readVersion = tx.getOCCReadVersion(key);
                 if (tx.getOCCReadVersion(key) != this.repo.getOCCVersion(key)) {
-                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+//                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
                     log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), key);
                     return false;
                 }

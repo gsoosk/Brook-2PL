@@ -543,6 +543,9 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("committing_time")),
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            if (result.getMetrics().containsKey("wasted"))
+                stats.setWaistedTime(Long.parseLong(result.getMetrics().get("wasted")));
+
 //                            log.info("request successful {}:{}", request.getType(),request.getValues());
         }
     }
@@ -1106,6 +1109,10 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("committing_time")),
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            if (result.getMetrics().containsKey("wasted"))
+                stats.setWaistedTime(Long.parseLong(result.getMetrics().get("wasted")));
+            if (result.getMetrics().containsKey("retry"))
+                stats.setRetryNumber(request.getTransactionId(), (int) Long.parseLong(result.getMetrics().get("retry")));
             log.info("request successful {}:{}", request.getType(),request.getValues());
 
             if (request.getType() == TPCCServerRequest.Type.INTERACTIVE) {
@@ -1196,6 +1203,10 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("committing_time")),
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            if (result.getMetrics().containsKey("wasted"))
+                stats.setWaistedTime(Long.parseLong(result.getMetrics().get("wasted")));
+            if (result.getMetrics().containsKey("retry"))
+                stats.setRetryNumber(request.getTransactionId(), (int) Long.parseLong(result.getMetrics().get("retry")));
 
             // TODO: add number of conflicts and wounds/aborts as ablation study
             log.info("request successful {}", request.getValues());
@@ -2048,6 +2059,25 @@ public class Performance {
             else if (type == StoreServerRequest.Type.SELL_HOT)
                 sellHotRecordNum.incrementAndGet();
 
+        }
+
+        public void setWaistedTime(long wasted) {
+            if (warmup.get())
+                return;
+            this.wastedTimeWork.addAndGet(wasted / 1000);
+        }
+
+        public void setRetryNumber(long c, int retry) {
+            if (warmup.get())
+                return;
+            if (retry == 0)
+                return;
+
+            if (retries.containsKey(c))
+                retries.put(c, retries.get(c) + retry);
+            else {
+                retries.put(c, retry);
+            }
         }
     }
 

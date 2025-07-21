@@ -12,7 +12,6 @@ import edgelab.retryFreeDB.repo.storage.InMemoryRepo;
 import edgelab.retryFreeDB.repo.storage.KeyValueRepository;
 import edgelab.retryFreeDB.repo.storage.PostgresRepo;
 import lombok.extern.slf4j.Slf4j;
-import org.checkerframework.checker.units.qual.A;
 import org.jgrapht.alg.util.Pair;
 import org.rocksdb.RocksDBException;
 
@@ -20,7 +19,6 @@ import java.sql.Connection;
 import java.sql.PreparedStatement;
 import java.sql.SQLException;
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.HashMap;
 import java.util.HashSet;
 import java.util.List;
@@ -28,7 +26,6 @@ import java.util.Map;
 import java.util.Objects;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 
 @Slf4j
@@ -888,7 +885,7 @@ public class ConcurrencyControl {
             this.IC3LastAccess.computeIfAbsent(key, k ->  new ArrayList<>());
             List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
 
-            synchronized (accList) {
+//            synchronized (accList) {
                 if (!accList.isEmpty()) {
                     DBTransaction tw = getLastWriteAccess(accList, tx);
 
@@ -896,13 +893,13 @@ public class ConcurrencyControl {
                         tx.addIC3Dependency(tw);
                 }
                 accList.add(new Pair<>(tx, "reader"));
-            }
+//            }
         }
 
         for (String key : piece.getWriteSet().keySet()) {
             this.IC3LastAccess.computeIfAbsent(key, k ->  new ArrayList<>());
             List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
-            synchronized (accList) {
+//            synchronized (accList) {
                 if (!accList.isEmpty()) {
                     DBTransaction trw = getLastReadOrWriteAccess(accList, tx);
                     if (trw != null)
@@ -910,7 +907,7 @@ public class ConcurrencyControl {
                 }
 
                 accList.add(new Pair<>(tx, "writer"));
-            }
+//            }
 
             updateIC3Stash(tx, piece, key);
         }
@@ -937,10 +934,9 @@ public class ConcurrencyControl {
     }
 
     private void updateIC3Stash(DBTransaction tx, IC3Piece piece, String key) throws Exception {
-        if (IC3_ENABLE) {
-            this.OCCVersion.computeIfAbsent(key, k -> new AtomicInteger());
-            this.OCCVersion.get(key).incrementAndGet();
-        }
+        this.OCCVersion.computeIfAbsent(key, k -> new AtomicInteger());
+        this.OCCVersion.get(key).incrementAndGet();
+
 
         if (piece.getWriteSet().get(key) instanceof DBInsertData data) {
             log.info("{}: insert stash {}:{}", tx.getTimestamp(), data.getTable(), data.getRecordId());
@@ -962,21 +958,33 @@ public class ConcurrencyControl {
 
     public void updateIC3(DBTransaction tx, DBData data, String key) throws Exception {
         updateOCC(tx, data);
-        this.IC3LastAccess.computeIfAbsent(key, k -> Collections.synchronizedList(new ArrayList<>()));
-        List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
-        synchronized (accList) {
-            removeFromAccessList(tx, accList);
-        }
     }
 
-    private static List<Pair<DBTransaction, String>> removeFromAccessList(DBTransaction tx, List<Pair<DBTransaction, String>> pairs) {
-        synchronized (pairs) {
-            for (int i = pairs.size() - 1; i >= 0; i--) {
-                if (pairs.get(i).getFirst().equals(tx))
-                    pairs.remove(i);
+    public void clearIC3AccessList(DBTransaction tx) throws Exception {
+        for (String key : tx.getOCCWriteSet().keySet()) {
+            if (!this.IC3LastAccess.containsKey(key))
+                continue;
+            List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
+            removeFromAccessList(tx, accList, "writer");
+        }
+
+        for (String key : tx.getOCCReadSet()) {
+            if (!this.IC3LastAccess.containsKey(key))
+                continue;
+            List< Pair<DBTransaction, String>> accList = this.IC3LastAccess.get(key);
+            removeFromAccessList(tx, accList, "reader");
+        }
+
+
+    }
+
+    private static void removeFromAccessList(DBTransaction tx, List<Pair<DBTransaction, String>> pairs, String type) {
+        for (int i = pairs.size() - 1; i >= 0; i--) {
+            if (pairs.get(i).getFirst().equals(tx) && pairs.get(i).getSecond().equals(type)) {
+                pairs.remove(i);
+                return;
             }
         }
-        return pairs;
     }
 
     public int getOCCVersion(String key) {

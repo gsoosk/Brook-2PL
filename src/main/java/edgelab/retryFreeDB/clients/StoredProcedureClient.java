@@ -1487,8 +1487,14 @@ public class StoredProcedureClient extends Client{
 
                 boolean piece1Res = false;
                 int retry = 0;
+                long wastedTime = 0;
+                long startTime = System.nanoTime();
                 while (!piece1Res) {
-                    if (retry > 10) {
+                    wastedTime += System.nanoTime() - startTime;
+                    startTime = System.nanoTime();
+
+
+                    if (retry > 100) {
                         rollback(dbTransaction);
                         return res;
                     }
@@ -1528,6 +1534,13 @@ public class StoredProcedureClient extends Client{
 
 
                 getCommitResult(dbTransaction, res);
+                if (res.metrics != null) {
+                    HashMap<String, String> newMetrics = new HashMap<>(res.metrics);
+                    newMetrics.put("wasted", String.valueOf(wastedTime));
+                    newMetrics.put("retry", String.valueOf(retry - 1));
+                    res.setMetrics(newMetrics);
+                }
+
                 res.setMessage(listingRecordId);
                 return res;
             } catch (Exception e) {
@@ -2044,8 +2057,12 @@ public class StoredProcedureClient extends Client{
 
                 boolean p1Result = false;
                 int retry = 0;
+                long wastedTime = 0;
+                long startTime = System.nanoTime();
                 while (!p1Result) {
-                    if (retry > 10)
+                    wastedTime += System.nanoTime() - startTime;
+                    startTime = System.nanoTime();
+                    if (retry > 100)
                     {
                         rollback(dbTransaction);
                         return res;
@@ -2057,7 +2074,12 @@ public class StoredProcedureClient extends Client{
 
                 getCommitResult(dbTransaction, res);
 
-
+                if (res.metrics != null) {
+                    HashMap<String, String> newMetrics = new HashMap<>(res.metrics);
+                    newMetrics.put("wasted", String.valueOf(wastedTime));
+                    newMetrics.put("retry", String.valueOf(retry - 1));
+                    res.setMetrics(newMetrics);
+                }
                 return res;
             } catch (Exception e) {
                 rollback(dbTransaction);
