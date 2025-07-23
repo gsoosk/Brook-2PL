@@ -1717,7 +1717,7 @@ public class Performance {
             this.finished = System.currentTimeMillis();
             this.windowStart = System.currentTimeMillis();
             this.iteration = new AtomicInteger(0);
-            this.sampling = (int) (numRecords / Math.min(numRecords, 50000));
+            this.sampling = 1000;
             this.latencies = new ConcurrentLinkedQueue<>();
             this.index = new AtomicInteger(0);
             this.startedBytes = new AtomicInteger(0);
@@ -2062,9 +2062,10 @@ public class Performance {
         }
 
         public void setWaistedTime(long wasted) {
-            if (warmup.get())
-                return;
+//            if (warmup.get())
+//                return;
             this.wastedTimeWork.addAndGet(wasted / 1000);
+            this.usefulWorkTime.addAndGet(-1 * (wasted / 1000));
         }
 
         public void setRetryNumber(long c, int retry) {

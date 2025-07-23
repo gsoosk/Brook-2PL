@@ -198,7 +198,7 @@ public class RetryFreeDBServer {
                 int currVersion = piece.getOCCReadVersion(key);
                 int pieceVersion = this.repo.getOCCVersion(key);
                 if (pieceVersion != currVersion) {
-//                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
                     log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", piece, piece.getReadSet(), piece.getWriteSet(), key);
                     return false;
                 }
@@ -287,7 +287,7 @@ public class RetryFreeDBServer {
             long startTime = System.nanoTime();
 
             String transactionId;
-            if ( request.getTransactionId().isEmpty()  || this.mode.equals("occ") || this.mode.equals("ic3")) // for occ we always increment
+            if ( request.getTransactionId().isEmpty()) // for occ we always increment
                 transactionId = String.valueOf(lastTransactionId.incrementAndGet());
             else
                 transactionId = request.getTransactionId();
@@ -748,7 +748,7 @@ public class RetryFreeDBServer {
                 int currVersion = this.repo.getOCCVersion(key);
                 int readVersion = tx.getOCCReadVersion(key);
                 if (tx.getOCCReadVersion(key) != this.repo.getOCCVersion(key)) {
-//                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
                     log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), key);
                     return false;
                 }

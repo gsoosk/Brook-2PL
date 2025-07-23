@@ -315,4 +315,24 @@ public class DBTransaction {
     public int getOCCReadVersion(String key) {
         return OCCVersions.get(key);
     }
+
+    public void resetTimes() {
+        this.waitingTime = 0;
+        this.ioTime = 0;
+        this.lockingTime = 0;
+        this.retiringTime = 0;
+        this.initiationTime = 0;
+        this.unlockingTime = 0;
+        this.committingTime = 0;
+        this.waitingForOthersTime = 0;
+        this.rollingBackTime = 0;
+        previousRetireStart = -1;
+        previousWaitStart = -1;
+        previousIOStart = -1;
+        previousLockStart = -1;
+        previousUnlockStart = -1;
+        previousCommitStart = -1;
+        previousWaitingForOthersStart = -1;
+        previousRollBackStart = -1;
+    }
 }
