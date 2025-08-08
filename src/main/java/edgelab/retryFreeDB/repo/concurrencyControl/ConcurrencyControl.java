@@ -865,9 +865,11 @@ public class ConcurrencyControl {
             return;
 
         if (OCC_ENABLE) {
-            String key = data instanceof DBInsertData ? InMemoryRepo.getInsertKey((DBInsertData) data) : data.getKey();
-            this.OCCVersion.computeIfAbsent(key, k -> new AtomicInteger());
-            int v = this.OCCVersion.get(key).incrementAndGet();
+            if (!data.getTable().equals("order_line") && !data.getTable().equals("new_order") && !data.getTable().equals("history") && !data.getTable().equals("oorder")) { // do not save orderline and neworder due to memory limit
+                String key = data instanceof DBInsertData ? InMemoryRepo.getInsertKey((DBInsertData) data) : data.getKey();
+                this.OCCVersion.computeIfAbsent(key, k -> new AtomicInteger());
+                int v = this.OCCVersion.get(key).incrementAndGet();
+            }
         }
 
 

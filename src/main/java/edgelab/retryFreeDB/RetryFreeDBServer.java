@@ -198,7 +198,7 @@ public class RetryFreeDBServer {
                 int currVersion = piece.getOCCReadVersion(key);
                 int pieceVersion = this.repo.getOCCVersion(key);
                 if (pieceVersion != currVersion) {
-                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+//                    delayMicroseconds((int) (Math.random() * 20));
                     log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", piece, piece.getReadSet(), piece.getWriteSet(), key);
                     return false;
                 }
@@ -341,6 +341,7 @@ public class RetryFreeDBServer {
             if (tx.isRolledBack())
                 return;
             tx.startRollingBack();
+            tx.setAbort();
             log.info("{}: needs to be aborted Try to abort.", tx);
             log.info("abort size: {}", toBeAbortedTransactions.size());
             try {
@@ -742,13 +743,13 @@ public class RetryFreeDBServer {
         }
 
         private boolean OCCValidation(DBTransaction tx) {
-
             // validation with version
             for (String key : tx.getOCCReadSet()) {
                 int currVersion = this.repo.getOCCVersion(key);
                 int readVersion = tx.getOCCReadVersion(key);
                 if (tx.getOCCReadVersion(key) != this.repo.getOCCVersion(key)) {
-                    delayMicroseconds((int) (Math.random() * (150 - 20 + 1) + 20));
+//                    delayMicroseconds((int) (Math.random() * (320 - 70 + 1) + 70));
+                    delayMicroseconds((int) (Math.random() *  30));
                     log.error("Could not validate tx : {}, {} | {} Conflict on read key: {}", tx, tx.getOCCReadSet(), tx.getOCCWriteSet(), key);
                     return false;
                 }
