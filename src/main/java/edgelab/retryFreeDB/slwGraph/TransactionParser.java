@@ -4,8 +4,13 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.regex.Matcher;
 import java.util.regex.Pattern;
+import org.json.JSONArray;
+import org.json.JSONException;
+import org.json.JSONObject;
+
 
 public class TransactionParser {
+
 
     /**
      * Parses the given TX program string and returns a TransactionRepresentation.
@@ -113,6 +118,81 @@ public class TransactionParser {
         return tx;
     }
 
+    /**
+     * Parses a transaction described in JSON and returns a TransactionRepresentation.
+     * Expected JSON schema:
+     * {
+     *   "transactionName": "…",       // optional, currently ignored
+     *   "inputs": ["input1", "input2"],
+     *   "statements": [
+     *     {
+     *       "type": "read",           // "read" | "write" | "delete" | "insert"
+     *       "table": "tableName",
+     *       "key": "key",             // optional for insert
+     *       "output": "outputName",   // only for reads
+     *       "commutative": false
+     *     },
+     *     …
+     *   ]
+     * }
+     *
+     * @param jsonTx the transaction JSON string
+     * @return a TransactionRepresentation populated with inputs & operations
+     * @throws JSONException if the JSON is malformed
+     */
+    public static TransactionRepresentation parseTransactionFromJson(String jsonTx) throws JSONException {
+        JSONObject root = new JSONObject(jsonTx);
+
+        // 1) inputs
+        JSONArray inArr = root.getJSONArray("inputs");
+        List<String> inputs = new ArrayList<>(inArr.length());
+        for (int i = 0; i < inArr.length(); i++) {
+            inputs.add(inArr.getString(i));
+        }
+
+        // create transaction
+        TransactionRepresentation tx = new TransactionRepresentation(inputs, new ArrayList<>());
+
+        // 2) statements
+        JSONArray stmts = root.getJSONArray("statements");
+        for (int i = 0; i < stmts.length(); i++) {
+            JSONObject stmt = stmts.getJSONObject(i);
+            String type       = stmt.getString("type");
+            String tableName  = stmt.getString("table");
+            String key        = stmt.optString("key", null);
+            String outputName = stmt.optString("output", null);
+            boolean comm      = stmt.optBoolean("commutative", false);
+
+            // strip dot‐suffix if any
+            if (key != null && key.contains(".")) {
+                key = key.substring(0, key.indexOf('.'));
+            }
+
+            // map to our enum
+            TransactionRepresentation.Operation.Type opType;
+            switch (type.toLowerCase()) {
+                case "read":   opType = TransactionRepresentation.Operation.Type.READ;  break;
+                case "write":
+                case "delete":
+                case "insert":
+                    opType = TransactionRepresentation.Operation.Type.WRITE;
+                    break;
+                default:
+                    throw new IllegalArgumentException("Unknown statement type: " + type);
+            }
+
+            // build operation
+            TransactionRepresentation.Operation op =
+                    tx.new Operation(outputName, opType, tableName, key);
+            op.setCommutative(comm);
+            // if you ever want a self‐comm flag, you could check a separate JSON field
+            tx.getOperations().add(op);
+        }
+
+        return tx;
+    }
+
+
     public static void main(String[] args) {
         String program = "TX(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId):\n" +
                 "W = Read(warehouse, warehouseId)\n" +
@@ -132,5 +212,71 @@ public class TransactionParser {
                     ", ID: " + op.getId() +
                     ", Commutative: " + op.isCommutative());
         }
+
+
+        String programJson = "  {\n" +
+                "    \"transactionName\": \"payment\",\n" +
+                "    \"inputs\": [\"warehouseId\", \"districtId\", \"paymentAmount\", \"customerWarehouseId\", \"customerDistrictId\", \"customerId\", \"txId\"],\n" +
+                "    \"statements\": [\n" +
+                "      {\n" +
+                "        \"type\": \"read\",\n" +
+                "        \"table\": \"warehouse\",\n" +
+                "        \"key\": \"warehouseId\",\n" +
+                "        \"output\": \"W\",\n" +
+                "        \"commutative\": false\n" +
+                "      },\n" +
+                "      {\n" +
+                "        \"type\": \"write\",\n" +
+                "        \"table\": \"warehouse\",\n" +
+                "        \"key\": \"warehouseId, paymentAmount\",\n" +
+                "        \"commutative\": false\n" +
+                "      },\n" +
+                "      {\n" +
+                "        \"type\": \"read\",\n" +
+                "        \"table\": \"district\",\n" +
+                "        \"key\": \"warehouseId, districtId\",\n" +
+                "        \"output\": \"D\",\n" +
+                "        \"commutative\": false\n" +
+                "      },\n" +
+                "      {\n" +
+                "        \"type\": \"write\",\n" +
+                "        \"table\": \"district\",\n" +
+                "        \"key\": \"warehouseId, districtId, paymentAmount\",\n" +
+                "        \"commutative\": false\n" +
+                "      },\n" +
+                "      {\n" +
+                "        \"type\": \"read\",\n" +
+                "        \"table\": \"customer\",\n" +
+                "        \"key\": \"customerWarehouseId, customerDistrictId, customerId\",\n" +
+                "        \"output\": \"C\",\n" +
+                "        \"commutative\": false\n" +
+                "      },\n" +
+                "      {\n" +
+                "        \"type\": \"write\",\n" +
+                "        \"table\": \"customer\",\n" +
+                "        \"key\": \"customerWarehouseId, customerDistrictId, customerId, paymentAmount\",\n" +
+                "        \"commutative\": false\n" +
+                "      },\n" +
+                "      {\n" +
+                "        \"type\": \"insert\",\n" +
+                "        \"table\": \"history\",\n" +
+                "        \"key\": \"warehouseId, districtId, customerWarehouseId, customerDistrictId, customerId, paymentAmount, W.w_name, D.d_name\",\n" +
+                "        \"commutative\": true\n" +
+                "      }\n" +
+                "    ]\n" +
+                "  }";
+        tx = parseTransactionFromJson(programJson);
+        System.out.println("Inputs: " + tx.getInputs());
+        System.out.println("Operations:");
+        for (TransactionRepresentation.Operation op : tx.getOperations()) {
+            System.out.println("Output: " + op.getOutputName() +
+                    ", Type: " + op.getType() +
+                    ", Table: " + op.getTableName() +
+                    ", ID: " + op.getId() +
+                    ", Commutative: " + op.isCommutative());
+        }
     }
+
+
+
 }

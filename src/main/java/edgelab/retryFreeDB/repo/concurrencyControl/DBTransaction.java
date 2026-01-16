@@ -6,10 +6,15 @@ import lombok.Getter;
 import lombok.Setter;
 
 import java.sql.Connection;
+import java.util.ArrayList;
+import java.util.Enumeration;
+import java.util.HashSet;
 import java.util.Map;
 import java.util.Optional;
 import java.util.Set;
+import java.util.List;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.ConcurrentLinkedQueue;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 
@@ -74,6 +79,42 @@ public class DBTransaction {
     private final Set<String> OCCReadSet;
     @Getter
     private final Map<String, DBData> OCCWriteSet;
+
+    private List<String> OCCtoLock =  null;
+
+    public List<String> getOCCtoLock() {
+        if (this.OCCtoLock == null) {
+            Set<String> toLockSet = new HashSet<>(this.getOCCReadSet());
+            toLockSet.addAll(this.getOCCWriteSet().keySet());
+            this.OCCtoLock = new ArrayList<>(toLockSet);
+            this.OCCtoLock.sort(String::compareTo);
+        }
+        return this.OCCtoLock;
+    }
+
+    @Getter
+    private final Set<DBTransaction> IC3DepQueue = ConcurrentHashMap.newKeySet();
+
+    public void addIC3Dependency(DBTransaction tx) {
+        IC3DepQueue.add(tx);
+    }
+
+    @Getter
+    private final ConcurrentLinkedQueue<IC3Piece> IC3Pieces = new ConcurrentLinkedQueue<IC3Piece>();
+
+    @Setter
+    @Getter
+    private IC3Piece activeIC3Piece;
+
+    private final AtomicBoolean committed = new AtomicBoolean(false);
+
+    public void commit() {
+        committed.set(true);
+    }
+
+    public boolean isCommitted() {
+        return committed.get();
+    }
 
 
     private final AtomicBoolean OCCValidated;
@@ -241,13 +282,57 @@ public class DBTransaction {
         return System.nanoTime() - startTime > DEADLOCK_TIMEOUT;
     }
 
-    public void addOCCRead(String key) {
+    public void addOCCRead(String key, int version) {
+        this.OCCVersions.putIfAbsent(key, version);
         this.OCCReadSet.add(key);
     }
 
 
-    public void addOCCWrite(String key, DBData value) {
-        this.OCCReadSet.add(key);
+    public void addOCCWrite(String key, DBData value, int version) {
+//        this.OCCReadSet.add(key);
         this.OCCWriteSet.put(key, value);
+    }
+
+    public void addIC3Piece(IC3Piece piece) {
+        this.IC3Pieces.add(piece);
+    }
+
+
+
+
+
+
+   @Getter
+   @Setter
+    public Set<String> initOCCActiveTransactions = ConcurrentHashMap.newKeySet();
+
+
+    @Getter
+    private final ConcurrentHashMap<String, Integer> OCCVersions = new ConcurrentHashMap<>();
+
+
+
+    public int getOCCReadVersion(String key) {
+        return OCCVersions.get(key);
+    }
+
+    public void resetTimes() {
+        this.waitingTime = 0;
+        this.ioTime = 0;
+        this.lockingTime = 0;
+        this.retiringTime = 0;
+        this.initiationTime = 0;
+        this.unlockingTime = 0;
+        this.committingTime = 0;
+        this.waitingForOthersTime = 0;
+        this.rollingBackTime = 0;
+        previousRetireStart = -1;
+        previousWaitStart = -1;
+        previousIOStart = -1;
+        previousLockStart = -1;
+        previousUnlockStart = -1;
+        previousCommitStart = -1;
+        previousWaitingForOthersStart = -1;
+        previousRollBackStart = -1;
     }
 }

@@ -8,6 +8,7 @@ import edgelab.proto.Result;
 import edgelab.retryFreeDB.RetryFreeDBServer;
 import edgelab.retryFreeDB.benchmark.Performance;
 import edgelab.retryFreeDB.repo.concurrencyControl.DBTransaction;
+import edgelab.retryFreeDB.repo.concurrencyControl.IC3Piece;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 
@@ -174,14 +175,20 @@ public class StoredProcedureClient extends Client{
     }
     public TransactionResult TPCC_newOrder(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
         switch (mode) {
-            case "ww" -> {
+            case "ww" , "occ"-> {
                 return TPCC_newOrderWW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
             }
             case "slw" -> {
                 return TPCC_newOrderSLW(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
             }
+            case "ordered" -> {
+                return TPCC_newOrderOrdered(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
+            }
             case "bamboo" -> {
                 return TPCC_newOrderBamboo(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
+            }
+            case "ic3" -> {
+                return TPCC_newOrderIC3(warehouseId, districtId, customerId, orderLineCount, allLocals, itemIDs, supplierWarehouseIDs, orderQuantities, txId);
             }
             default -> {
                 log.error("Does not support this mode: {}", mode);
@@ -190,7 +197,260 @@ public class StoredProcedureClient extends Client{
         }
     }
 
+    public TransactionResult TPCC_newOrderIC3(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
 
+
+                IC3Piece piece1 = new IC3Piece(Set.of(
+                        "newOrder:p1",
+                        "payment:p1"
+                ), "newOrder:p1", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece1);
+
+                IC3Piece piece2 = new IC3Piece(Set.of(), "newOrder:p2", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece2);
+
+                IC3Piece piece3 = new IC3Piece(Set.of(), "newOrder:p3", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece3);
+
+
+
+                String listingRecordId = null;
+
+                boolean piece1Res = false;
+                int retry = 0;
+                Map<String, String> district = null;
+                while (!piece1Res) {
+                    if (retry > 100) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+
+
+                    dbService.ic3PieceBegin(dbTransaction, piece1);
+//              Get customer
+                    String customerIdKey = "c_w_id,c_d_id,c_id";
+                    String customerIdValue = warehouseId + "," + districtId + "," + customerId;
+                    Map<String, String> customer = read(dbTransaction, "customer", customerIdKey, customerIdValue);
+                    if (customer.isEmpty()) {
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        throw new Exception("customer does not exists");
+                    }
+
+
+//              Get warehouse
+                    Map<String, String> warehouse = read(dbTransaction, "warehouse", "w_id", warehouseId);
+                    if (warehouse.isEmpty()) {
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        throw new Exception("warehouse does not exists");
+                    }
+
+
+//              Get district
+                    district = read(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                    if (district.isEmpty()) {
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        throw new Exception("district does not exists");
+                    }
+
+//              Update district
+                    String d_next_o_id = String.valueOf(Integer.parseInt(district.get("d_next_o_id")) + 1);
+                    write(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId, "d_next_o_id", d_next_o_id);
+
+                    piece1Res = dbService.ic3PieceCommit(dbTransaction, piece1);
+
+
+                    retry++;
+                }
+
+
+
+
+                boolean piece2Res = false;
+                retry = 0;
+                while (!piece2Res) {
+                    if (retry > 100) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+                    dbService.ic3PieceBegin(dbTransaction, piece2);
+                    //              Insert OpenOrder
+                    String openOrderId = warehouseId + "," + districtId + "," + district.get("d_next_o_id");
+                    insert(dbTransaction, "oorder", customerId + "," +
+                                    "null" + "," +
+                                    orderLineCount + "," +
+                                    allLocals + "," +
+                                    "'" + new Timestamp(System.currentTimeMillis()) + "'"
+                            ,openOrderId);
+                    piece2Res =  dbService.ic3PieceCommit(dbTransaction, piece2);
+                    retry++;
+                }
+
+
+                boolean piece3Res = false;
+                retry = 0;
+                while (!piece3Res) {
+                    if (retry > 100) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+                    dbService.ic3PieceBegin(dbTransaction, piece3);
+
+
+                    //              Insert NewOrder
+                    String newOrderId = warehouseId + "," + districtId + "," + district.get("d_next_o_id");
+                    insertLock(dbTransaction, "new_order", newOrderId);
+                    insert(dbTransaction, "new_order", "", newOrderId);
+
+                    piece3Res =  dbService.ic3PieceCommit(dbTransaction, piece3);
+                    retry++;
+                }
+
+
+
+
+                for (int ol_number = 1; ol_number <= Integer.parseInt(orderLineCount); ol_number++) {
+                    String ol_supply_w_id = String.valueOf(supplierWarehouseIDs[ol_number - 1]);
+                    String ol_i_id = String.valueOf(itemIDs[ol_number - 1]);
+                    int ol_quantity = orderQuantities[ol_number - 1];
+
+
+                    IC3Piece piece4 = new IC3Piece(Set.of(), "newOrder:p4" + ol_number, dbTransaction.getTimestampValue());
+                    dbTransaction.addIC3Piece(piece4);
+
+                    IC3Piece piece5 = new IC3Piece(Set.of(), "newOrder:p5" + ol_number, dbTransaction.getTimestampValue());
+                    dbTransaction.addIC3Piece(piece5);
+
+                    IC3Piece piece6 = new IC3Piece(Set.of(), "newOrder:p6" + ol_number, dbTransaction.getTimestampValue());
+                    dbTransaction.addIC3Piece(piece6);
+
+                    IC3Piece piece7 = new IC3Piece(Set.of(), "newOrder:p7" + ol_number, dbTransaction.getTimestampValue());
+                    dbTransaction.addIC3Piece(piece7);
+
+                    boolean piece4Res = false;
+                    retry = 0;
+                    Map<String, String> item = null;
+                    while (!piece4Res) {
+                        if (retry > 100) {
+                            rollback(dbTransaction);
+                            return res;
+                        }
+                        dbService.ic3PieceBegin(dbTransaction, piece4);
+
+                        //                    Get Item Price
+                        item = read(dbTransaction, "item", "i_id", ol_i_id);
+
+                        piece4Res =  dbService.ic3PieceCommit(dbTransaction, piece4);
+                        retry++;
+                    }
+
+
+
+
+                    float ol_amount = ol_quantity * Float.parseFloat(item.get("i_price"));
+//                    Get Stock
+                    lock(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, READ_TYPE);
+                    Map<String, String> stock = null;
+
+                    boolean piece5Res = false;
+                    retry = 0;
+                    while (!piece5Res) {
+                        if (retry > 100) {
+                            rollback(dbTransaction);
+                            return res;
+                        }
+                        dbService.ic3PieceBegin(dbTransaction, piece5);
+
+                        //                    Get Item Price
+                        stock = read(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id);
+
+                        piece5Res =  dbService.ic3PieceCommit(dbTransaction, piece5);
+                        retry++;
+                    }
+
+
+
+                    String ol_dist_info = stock.get(getDistInfoKey(districtId));
+                    String newStockQuantity;
+                    if (Integer.parseInt(stock.get("s_quantity")) - ol_quantity >= 10) {
+                        newStockQuantity = String.valueOf(Integer.parseInt(stock.get("s_quantity")) - ol_quantity);
+                    } else {
+                        newStockQuantity = String.valueOf(Integer.parseInt(stock.get("s_quantity")) - ol_quantity + 91);
+                    }
+                    int stockRemoteCountIncrement = 0;
+                    if (!ol_supply_w_id.equals(warehouseId)) {
+                        stockRemoteCountIncrement += 1;
+                    }
+
+
+
+                    boolean piece6Res = false;
+                    retry = 0;
+                    while (!piece6Res) {
+                        if (retry > 100) {
+                            rollback(dbTransaction);
+                            return res;
+                        }
+                        dbService.ic3PieceBegin(dbTransaction, piece6);
+
+                        //                    Insert OrderLine
+                        String orderLineId = warehouseId + "," + districtId + "," + district.get("d_next_o_id") + "," + ol_number;
+                        insert(dbTransaction, "order_line", ol_i_id + "," + "'" + new Timestamp(System.currentTimeMillis()) + "'"
+                                + "," + ol_amount + "," + ol_supply_w_id + "," + ol_quantity + "," + ol_dist_info, orderLineId);
+
+                        piece6Res =  dbService.ic3PieceCommit(dbTransaction, piece6);
+                        retry++;
+                    }
+
+
+
+//                    Update Stock
+                    lock(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, WRITE_TYPE);
+
+                    Map<String, String> newStockValues = new HashMap<>();
+                    newStockValues.put( "s_quantity", newStockQuantity);
+                    newStockValues.put( "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
+                    newStockValues.put( "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
+                    newStockValues.put("s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+
+
+                    boolean piece7Res = false;
+                    retry = 0;
+                    while (!piece7Res) {
+                        if (retry > 100) {
+                            rollback(dbTransaction);
+                            return res;
+                        }
+                        dbService.ic3PieceBegin(dbTransaction, piece7);
+
+                        //                    Update Stock
+                        write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, newStockValues);
+
+                        piece7Res =  dbService.ic3PieceCommit(dbTransaction, piece7);
+                        retry++;
+                    }
+                }
+
+                getCommitResult(dbTransaction, res);
+
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+
+        return res;
+    }
 
 
     public TransactionResult TPCC_newOrderWW(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
@@ -555,6 +815,154 @@ public class StoredProcedureClient extends Client{
         return res;
     }
 
+    public TransactionResult TPCC_newOrderOrdered(String warehouseId, String districtId, String customerId, String orderLineCount, String allLocals, int[] itemIDs, int[] supplierWarehouseIDs, int[] orderQuantities, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+//              Get customer
+                String customerIdKey = "c_w_id,c_d_id,c_id";
+                String customerIdValue = warehouseId + "," + districtId + "," + customerId;
+                String d_next_o_id;
+                List<List<String>> allLocks = new ArrayList<>();
+                allLocks.add(List.of("customer", customerIdKey, customerIdValue, READ_TYPE));
+                allLocks.add(List.of("warehouse", "w_id", warehouseId, READ_TYPE));
+                allLocks.add(List.of("district", "d_w_id,d_id", warehouseId + "," + districtId, WRITE_TYPE));
+
+                Map<String, String> district = read(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                d_next_o_id = district.get("d_next_o_id");
+                String openOrderId = warehouseId + "," + districtId + "," + d_next_o_id;
+                allLocks.add(List.of("oorder", openOrderId, "", INSERT_TYPE));
+                String newOrderId = warehouseId + "," + districtId + "," + d_next_o_id;
+                allLocks.add(List.of("new_order", newOrderId, "", INSERT_TYPE));
+
+                for (int ol_number = 1; ol_number <= Integer.parseInt(orderLineCount); ol_number++) {
+                    String ol_supply_w_id = String.valueOf(supplierWarehouseIDs[ol_number - 1]);
+                    String ol_i_id = String.valueOf(itemIDs[ol_number - 1]);
+                    String orderLineId = warehouseId + "," + districtId + "," + d_next_o_id + "," + ol_number;
+
+
+                    allLocks.add(List.of("item", "i_id", String.valueOf(ol_i_id), READ_TYPE));
+                    allLocks.add(List.of("stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, WRITE_TYPE));
+                    allLocks.add(List.of("order_line", orderLineId, "", INSERT_TYPE));
+                }
+
+                allLocks.sort(Comparator.comparing(a -> (a.get(0) + a.get(1) + a.get(2))));
+                Collections.reverse(allLocks);
+
+                for (List<String> lockParams : allLocks) {
+                    String table = lockParams.get(0);
+                    String key = lockParams.get(1);
+                    String value = lockParams.size() > 2 ? lockParams.get(2) : "";
+                    String type = lockParams.get(3);
+
+                    if (type.equals(INSERT_TYPE)) {
+                        insertLock(dbTransaction, table, key);
+                    } else {
+                        lock(dbTransaction, table, key, value, type);
+                    }
+                }
+
+
+
+                Map<String, String> customer = read(dbTransaction, "customer", customerIdKey, customerIdValue);
+                if (customer.isEmpty())
+                    throw new Exception("customer does not exists");
+
+
+//              Get warehouse
+
+                Map<String, String> warehouse = read(dbTransaction, "warehouse", "w_id", warehouseId);
+                if (warehouse.isEmpty())
+                    throw new Exception("warehouse does not exists");
+
+
+
+//              Get district
+
+                district = read(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                if (district.isEmpty())
+                    throw new Exception("district does not exists");
+
+//              Update district
+
+                d_next_o_id = String.valueOf(Integer.parseInt(district.get("d_next_o_id")) + 1);
+                write(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId, "d_next_o_id", d_next_o_id);
+
+//              Insert OpenOrder
+
+
+                insert(dbTransaction, "oorder", customerId + "," +
+                                "null" + "," +
+                                orderLineCount + "," +
+                                allLocals + "," +
+                                "'" + new Timestamp(System.currentTimeMillis()) + "'"
+                        ,openOrderId);
+
+//              Insert NewOrder
+
+                insert(dbTransaction, "new_order", "", newOrderId);
+
+                for (int ol_number = 1; ol_number <= Integer.parseInt(orderLineCount); ol_number++) {
+                    String ol_supply_w_id = String.valueOf(supplierWarehouseIDs[ol_number - 1]);
+                    String ol_i_id = String.valueOf(itemIDs[ol_number - 1]);
+                    int ol_quantity = orderQuantities[ol_number - 1];
+
+//                    Get Item Price
+
+                    Map<String, String> item = read(dbTransaction, "item", "i_id", ol_i_id);
+                    float ol_amount = ol_quantity * Float.parseFloat(item.get("i_price"));
+//                    Get Stock
+
+                    Map<String, String> stock = read(dbTransaction, "stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id);
+
+                    String ol_dist_info = stock.get(getDistInfoKey(districtId));
+                    String newStockQuantity;
+                    if (Integer.parseInt(stock.get("s_quantity")) - ol_quantity >= 10) {
+                        newStockQuantity = String.valueOf(Integer.parseInt(stock.get("s_quantity")) - ol_quantity);
+                    } else {
+                        newStockQuantity = String.valueOf(Integer.parseInt(stock.get("s_quantity")) - ol_quantity + 91);
+                    }
+                    int stockRemoteCountIncrement = 0;
+                    if (!ol_supply_w_id.equals(warehouseId)) {
+                        stockRemoteCountIncrement += 1;
+                    }
+
+
+//                    Insert OrderLine
+                    String orderLineId = warehouseId + "," + districtId + "," + district.get("d_next_o_id") + "," + ol_number;
+
+                    insert(dbTransaction, "order_line", ol_i_id + "," + "'" + new Timestamp(System.currentTimeMillis()) + "'"
+                            + "," + ol_amount + "," + ol_supply_w_id + "," + ol_quantity + "," + ol_dist_info, orderLineId);
+
+
+
+                    Map<String, String> newStockValues = new HashMap<>();
+                    newStockValues.put( "s_quantity", newStockQuantity);
+                    newStockValues.put( "s_ytd", String.valueOf(Float.parseFloat(stock.get("s_ytd")) + ol_quantity));
+                    newStockValues.put( "s_order_cnt", String.valueOf(Integer.parseInt(stock.get("s_order_cnt")) + 1));
+                    newStockValues.put("s_remote_cnt", String.valueOf(Integer.parseInt(stock.get("s_remote_cnt")) + stockRemoteCountIncrement));
+                    write(dbTransaction,"stock", "s_w_id,s_i_id", ol_supply_w_id + "," + ol_i_id, newStockValues);
+                }
+
+                getCommitResult(dbTransaction, res);
+
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+
+        return res;
+    }
+
     private String getDistInfoKey(String districtId) {
         return switch (districtId) {
             case "1" -> "s_dist_01";
@@ -574,14 +982,20 @@ public class StoredProcedureClient extends Client{
 
     public TransactionResult TPCC_payment(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         switch (mode) {
-            case "ww" -> {
+            case "ww", "occ" -> {
                 return TPCC_paymentWW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
             }
             case "slw" -> {
                 return TPCC_paymentSLW(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
             }
+            case "ordered" -> {
+                return TPCC_paymentOrdered(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
+            }
             case "bamboo" -> {
                 return TPCC_paymentBamboo(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
+            }
+            case "ic3" -> {
+                return TPCC_paymentIC3(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, txId);
             }
             default -> {
                 log.error("Does not support this mode: {}", mode);
@@ -589,6 +1003,119 @@ public class StoredProcedureClient extends Client{
             }
         }
     }
+
+    public TransactionResult TPCC_paymentIC3(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+
+                IC3Piece piece1 = new IC3Piece(Set.of(
+                        "newOrder:p1",
+                        "payment:p1"
+                ), "payment:p1", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece1);
+
+                IC3Piece piece2 = new IC3Piece(Set.of(), "payment:p2", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece2);
+
+
+                boolean piece1Res = false;
+                int retry = 0;
+                while (!piece1Res) {
+                    if (retry > 100) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+                    dbService.ic3PieceBegin(dbTransaction, piece1);
+
+//            Get warehouse
+                    lock(dbTransaction, "warehouse", "w_id", warehouseId, READ_TYPE);
+                    Map<String, String> warehouse = read(dbTransaction, "warehouse", "w_id", warehouseId);
+                    if (warehouse.isEmpty()) {
+                        log.info("warehouse does not exists");
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        commit(dbTransaction);
+                        return res;
+
+                    }
+
+//            update warehouse
+                    lock(dbTransaction, "warehouse", "w_id", warehouseId, WRITE_TYPE);
+                    float newWarehouseBalance = Float.parseFloat(warehouse.get("w_ytd")) + paymentAmount;
+                    write(dbTransaction, "warehouse", "w_id", warehouseId, "w_ytd", String.valueOf(newWarehouseBalance)) ;
+
+
+
+//          get district
+                    lock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId, READ_TYPE);
+                    Map<String, String> district = read(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                    if (district.isEmpty()) {
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        throw new Exception("district does not exists");
+                    }
+                    //            Update District
+                    lock(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId, WRITE_TYPE);
+                    float newDistrictBalance = Float.parseFloat(district.get("d_ytd")) + paymentAmount;
+                    write(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId, "d_ytd", String.valueOf(newDistrictBalance)) ;
+
+                    //            Get customer
+                    String customerIdKey = "c_w_id,c_d_id,c_id";
+                    String customerIdValue = customerWarehouseId + "," + customerDistrictId + "," + customerId;
+                    lock(dbTransaction, "customer", customerIdKey, customerIdValue, READ_TYPE);
+                    Map<String, String> customer = read(dbTransaction, "customer", customerIdKey, customerIdValue);
+                    if (customer.isEmpty()) {
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        throw new Exception("customer does not exists");
+                    }
+
+//            Update customer
+                    lock(dbTransaction, "customer", customerIdKey, customerIdValue, WRITE_TYPE);
+                    updateCustomer(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, customer, dbTransaction, customerIdKey, customerIdValue);
+
+
+
+                    piece1Res =  dbService.ic3PieceCommit(dbTransaction, piece1);
+                    retry++;
+                }
+
+
+                boolean piece2Res = false;
+                retry = 0;
+                while (!piece2Res) {
+                    if (retry > 100) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+                    dbService.ic3PieceBegin(dbTransaction, piece2);
+
+
+                    //            insert history
+                    insertHistory(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, dbTransaction);
+
+
+                    piece2Res =  dbService.ic3PieceCommit(dbTransaction, piece2);
+                    retry++;
+                }
+
+
+                getCommitResult(dbTransaction, res);
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+
+        return res;
+    }
+
     public TransactionResult TPCC_paymentWW(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
         TransactionResult res = new TransactionResult();
         DBTransaction dbTransaction = null;
@@ -773,6 +1300,90 @@ public class StoredProcedureClient extends Client{
                 }
 
                 //            Get customer
+                Map<String, String> customer = read(dbTransaction, "customer", customerIdKey, customerIdValue);
+                if (customer.isEmpty())
+                    throw new Exception("customer does not exists");
+
+//            Update customer
+                updateCustomer(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, customer, dbTransaction, customerIdKey, customerIdValue);
+
+                //            insert history
+                insertHistory(warehouseId, districtId, paymentAmount, customerWarehouseId, customerDistrictId, customerId, dbTransaction);
+
+
+                getCommitResult(dbTransaction, res);
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+
+        return res;
+    }
+
+    public TransactionResult TPCC_paymentOrdered(String warehouseId, String districtId, float paymentAmount, String customerWarehouseId, String customerDistrictId, String customerId, String txId) {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+                String customerIdKey = "c_w_id,c_d_id,c_id";
+                String customerIdValue = customerWarehouseId + "," + customerDistrictId + "," + customerId;
+
+                List<List<String>> allLocks = new ArrayList<>();
+                allLocks.add(List.of("warehouse", "w_id", warehouseId, WRITE_TYPE));
+                allLocks.add(List.of("district", "d_w_id,d_id", warehouseId + "," + districtId, WRITE_TYPE));
+                allLocks.add(List.of("customer", customerIdKey, customerIdValue, WRITE_TYPE));
+
+                allLocks.sort(Comparator.comparing(a -> (a.get(0) + a.get(1) + a.get(2))));
+                Collections.reverse(allLocks);
+
+                for (List<String> lockParams : allLocks) {
+                    String table = lockParams.get(0);
+                    String key = lockParams.get(1);
+                    String value = lockParams.get(2);
+                    String type = lockParams.get(3);
+
+                    lock(dbTransaction, table, key, value, type);
+                }
+
+
+
+
+//            Get warehouse
+                Map<String, String> warehouse = read(dbTransaction, "warehouse", "w_id", warehouseId);
+                if (warehouse.isEmpty()) {
+                    log.info("warehouse does not exists");
+                    commit(dbTransaction);
+                    return res;
+
+                }
+
+//            update warehouse
+
+                float newWarehouseBalance = Float.parseFloat(warehouse.get("w_ytd")) + paymentAmount;
+                write(dbTransaction, "warehouse", "w_id", warehouseId, "w_ytd", String.valueOf(newWarehouseBalance)) ;
+
+
+
+//          get district
+                Map<String, String> district = read(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId);
+                if (district.isEmpty())
+                    throw new Exception("district does not exists");
+                //            Update District
+
+                float newDistrictBalance = Float.parseFloat(district.get("d_ytd")) + paymentAmount;
+                write(dbTransaction, "district", "d_w_id,d_id", warehouseId + "," + districtId, "d_ytd", String.valueOf(newDistrictBalance)) ;
+
+                //            Get customer
+
+
                 Map<String, String> customer = read(dbTransaction, "customer", customerIdKey, customerIdValue);
                 if (customer.isEmpty())
                     throw new Exception("customer does not exists");
@@ -1071,8 +1682,12 @@ public class StoredProcedureClient extends Client{
 
             if (mode.equals("bamboo")) {
                 if (readItemBamboo(items, dbTransaction)) return false;
-            } else if (mode.equals("ww")) {
+            } else if (mode.equals("ww") || mode.equals("occ")) {
                 if (readItems(items, dbTransaction)) return false;
+            } else if (mode.equals("ordered")) {
+                if (readItemsOrdered(items, dbTransaction)) return false;
+            } else if (mode.equals("ic3")) {
+                if (readItemsIC3(items, dbTransaction)) return false;
             }
             else {
                 if (readItemSLW(items, dbTransaction)) return false;
@@ -1082,6 +1697,56 @@ public class StoredProcedureClient extends Client{
         }
         return false;
     }
+
+    private boolean readItemsIC3(List<String> items, DBTransaction dbTransaction) {
+        IC3Piece piece1 = new IC3Piece(Set.of(
+                "buyListing:p1",
+                "addListing:p1"
+        ), "readItems:p1", dbTransaction.getTimestampValue());
+        dbTransaction.addIC3Piece(piece1);
+
+
+        try {
+
+            boolean piece1Res = false;
+            int retry = 0;
+            while (!piece1Res) {
+                if (retry > 100) {
+                    rollback(dbTransaction);
+                    return true;
+                }
+                dbService.ic3PieceBegin(dbTransaction, piece1);
+
+                try {
+                    for (String IId :
+                            items) {
+                        lock(dbTransaction, "Items", "IId", IId, READ_TYPE);
+                        Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
+
+                    }
+                } catch (Exception e) {
+                    rollback(dbTransaction);
+                    return true;
+                }
+
+
+                piece1Res = dbService.ic3PieceCommit(dbTransaction, piece1);
+                retry++;
+            }
+        }
+        catch (Exception e) {
+            return true;
+        }
+
+
+       return false;
+    }
+
+    private boolean readItemsOrdered(List<String> items, DBTransaction dbTransaction) {
+                Collections.sort(items);
+        return readItems(items, dbTransaction);
+    }
+
     private boolean readItemSLW(List<String> items, DBTransaction tx) {
 //        Collections.sort(items);
         return readItems(items, tx);
@@ -1176,10 +1841,142 @@ public class StoredProcedureClient extends Client{
     public TransactionResult addListing(String PId, String IId, double price, String txId) {
         return switch (mode) {
             case "slw" -> addListingSLW(PId, IId, price, txId);
+            case "ordered" -> addListingOrdered(PId, IId, price, txId);
             case "bamboo" -> addListingBamboo(PId, IId, price, txId);
-            case "ww" -> addListingWW(PId, IId, price, txId);
+            case "ww", "occ"-> addListingWW(PId, IId, price, txId);
+            case "ic3" -> addListingIC3(PId, IId, price, txId);
+//            case "occ" -> dummyOCC();
             default -> new TransactionResult();
         };
+    }
+
+    public TransactionResult dummyOCC() {
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+                Map<String, String> x = read(dbTransaction, "Items", "IId","1000");
+                write(dbTransaction, "Items", "IId", "1000", x);
+                getCommitResult(dbTransaction, res);
+                res.setMessage("1");
+                return res;
+            } catch (Exception e) {
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+
+        return res;
+    }
+
+
+    public TransactionResult addListingIC3(String PId, String IId, double price, String txId) {
+
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+            try {
+//
+//            Map<String, String> listing = read(dbTransaction, "Listings", "LIId", IId);
+////            Check no listing exists with the item id
+//            if (!listing.isEmpty()) {
+//                log.info("listing exists");
+//                commit(dbTransaction);
+//                return;
+//            }
+
+//                Map<String, String> x = read(dbTransaction, "Items", "IId","1000");
+//                write(dbTransaction, "Items", "IId", "1000", x);
+
+                IC3Piece piece1 = new IC3Piece(Set.of(
+                        "buyListing:p1",
+                        "addListing:p1"
+                ), "addListing:p1", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece1);
+
+
+
+
+                String listingRecordId = null;
+
+                boolean piece1Res = false;
+                int retry = 0;
+                long wastedTime = 0;
+                long startTime = System.nanoTime();
+                while (!piece1Res) {
+                    wastedTime += System.nanoTime() - startTime;
+                    startTime = System.nanoTime();
+                    dbTransaction.resetTimes();
+
+
+                    if (retry > 100) {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+                    dbService.ic3PieceBegin(dbTransaction, piece1);
+                    Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
+
+                    if (item.isEmpty()) {
+                        log.info("Item does not exists!");
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        commit(dbTransaction);
+                        return res;
+                    }
+
+                    if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
+                        log.info("item has a different owner! {}<>{}", item.get("IOwner"), PId);
+                        dbService.ic3PieceCommit(dbTransaction, piece1);
+                        commit(dbTransaction);
+                        return res;
+                    }
+
+                    Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+                    //            Check player exists
+                    if (player.isEmpty()) {
+                        log.info("player does not exists!");
+                        commit(dbTransaction);
+                        return res;
+                    }
+
+                    Result insertListingResult = insertLock(dbTransaction, "Listings");
+                    listingRecordId = insertListingResult.getMessage();
+                    insert(dbTransaction, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
+
+
+                    piece1Res = dbService.ic3PieceCommit(dbTransaction, piece1);
+                    retry++;
+                }
+
+
+                getCommitResult(dbTransaction, res);
+                if (res.metrics != null) {
+                    HashMap<String, String> newMetrics = new HashMap<>(res.metrics);
+                    newMetrics.put("wasted", String.valueOf(wastedTime));
+                    newMetrics.put("retry", String.valueOf(retry - 1));
+                    res.setMetrics(newMetrics);
+                }
+
+                res.setMessage(listingRecordId);
+                return res;
+            } catch (Exception e) {
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+
+        return res;
     }
 
     public TransactionResult addListingWW(String PId, String IId, double price, String txId) {
@@ -1202,6 +1999,9 @@ public class StoredProcedureClient extends Client{
 //                commit(dbTransaction);
 //                return;
 //            }
+
+//                Map<String, String> x = read(dbTransaction, "Items", "IId","1000");
+//                write(dbTransaction, "Items", "IId", "1000", x);
 
                 lock(dbTransaction, "Items", "IId", IId, READ_TYPE);
                 Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
@@ -1266,6 +2066,7 @@ public class StoredProcedureClient extends Client{
 
                 lock(dbTransaction, "Items", "IId", IId, READ_TYPE);
                 Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
+
                 if (item.isEmpty()) {
                     log.info("Item does not exists!");
                     commit(dbTransaction);
@@ -1281,6 +2082,7 @@ public class StoredProcedureClient extends Client{
 
                 lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+
 //            Check player exists
                 if (player.isEmpty()) {
                     log.info("player does not exists!");
@@ -1323,6 +2125,7 @@ public class StoredProcedureClient extends Client{
                 //            R from L where Lid
                 lock(dbTransaction, "Listings", "LId", LId, READ_TYPE);
                 Map<String, String> listing = read(dbTransaction, "Listings", "LId", LId);
+                retireLock(dbTransaction, "Listings", "LId", LId);
 //            Check player exists
                 if (listing.isEmpty()) {
                     log.info("listing does not exists!");
@@ -1334,6 +2137,8 @@ public class StoredProcedureClient extends Client{
                 lock(dbTransaction, "Players", "PId", PId, READ_TYPE);
 //            TODO: WE MIGHT NEED TO ROLLBACK
                 Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+//                retireLock(dbTransaction, "Players", "PId", PId);
+
 //            Check player exists
                 if (player.isEmpty()) {
                     log.info("player does not exists!");
@@ -1352,6 +2157,7 @@ public class StoredProcedureClient extends Client{
 //            Read from I where LIId
                 lock(dbTransaction, "Items", "IId", listing.get("LIId"), READ_TYPE);
                 Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("LIId"));
+//                retireLock(dbTransaction, "Items", "IId", listing.get("LIId"));
                 //            Check item exists
                 if (item.isEmpty()) {
                     log.info("item does not exists!");
@@ -1363,6 +2169,7 @@ public class StoredProcedureClient extends Client{
 //            Delete from L where LID
                 lock(dbTransaction, "Listings", "LId", LId, WRITE_TYPE);
                 delete(dbTransaction, "Listings", "LId", LId);
+                retireLock(dbTransaction, "Listings", "LId", LId);
 
 
 //            R from P where ppid
@@ -1486,6 +2293,67 @@ public class StoredProcedureClient extends Client{
         }
         return res;
     }
+
+    public TransactionResult addListingOrdered(String PId, String IId, double price, String txId) {
+        log.info("add listing <PID:{}, IID:{}>", PId, IId);
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+//            String transactionId = dbTransaction.getTimestamp();
+            try {
+                String listingRecordId = "";
+
+                List<List<String>> allLocks =  List.of(
+                        List.of("Items", "IId", IId, READ_TYPE),
+                        List.of("Listings", "LId", "", INSERT_TYPE),
+                        List.of("Players", "PId", PId, READ_TYPE)
+                );
+                for (List<String> toLock :
+                        allLocks) {
+                    if (Objects.equals(toLock.get(3), INSERT_TYPE))
+                        listingRecordId = insertLock(dbTransaction, toLock.get(0)).getMessage();
+                    else
+                        lock(dbTransaction, toLock.get(0), toLock.get(1), toLock.get(2), toLock.get(3));
+                }
+
+                Map<String, String> item = read(dbTransaction, "Items", "IId", IId);
+//             Check the owner
+                if (Integer.parseInt(item.get("IOwner")) != Integer.parseInt(PId)) {
+                    log.error("item has a different owner! {}<>{}", item.get("IOwner"), PId);
+                    commit(dbTransaction);
+                    return res;
+                }
+
+//                if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING)
+//                    unlock(dbTransaction, "Items", "IId", IId);
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+//            Check player exists
+                if (player.isEmpty()) {
+                    log.error("player does not exists!");
+                    commit(dbTransaction);
+                    return res;
+                }
+
+                insert(dbTransaction, "Listings", IId + "," + price, listingRecordId, "LIId,LPrice");
+                getCommitResult(dbTransaction, res);
+                res.setMessage(listingRecordId);
+                return res;
+
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+
     public TransactionResult lockOrderProblem(String PId, String PPId, String txId) {
         return switch (mode) {
             case "slw" -> lockOrderProblemSLW(PId, PPId, txId);
@@ -1582,10 +2450,143 @@ public class StoredProcedureClient extends Client{
     public TransactionResult buyListing(String PId, String LId, String txId) {
         return switch (mode) {
             case "slw" -> buyListingSLW(PId, LId, txId);
+            case "ordered" -> buyListingORDERED(PId, LId, txId);
+            case "ic3" -> buyListingIC3(PId, LId, txId);
             case "bamboo" -> buyListingBamboo(PId, LId, txId);
-            case "ww" -> buyListingWW(PId, LId, txId);
+            case "ww", "occ"-> buyListingWW(PId, LId, txId);
+//            case "occ" -> dummyOCC();
             default -> new TransactionResult();
         };
+    }
+
+
+    public TransactionResult buyListingIC3(String PId, String LId, String txId) {
+
+        TransactionResult res = new TransactionResult();
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+
+        if (dbTransaction != null) {
+            try {
+
+                IC3Piece piece1 = new IC3Piece(Set.of(
+                        "addListing:p1",
+                        "buyListing:p1"
+                ), "buyListing:p1", dbTransaction.getTimestampValue());
+                dbTransaction.addIC3Piece(piece1);
+//                TODO: implement grpc call
+
+                boolean p1Result = false;
+                int retry = 0;
+                long wastedTime = 0;
+                long startTime = System.nanoTime();
+                while (!p1Result) {
+                    wastedTime += System.nanoTime() - startTime;
+                    startTime = System.nanoTime();
+                    dbTransaction.resetTimes();
+                    if (retry > 100)
+                    {
+                        rollback(dbTransaction);
+                        return res;
+                    }
+                    p1Result = runBuyListingIC3Piece(PId, LId, dbTransaction, piece1, res);
+                    retry++;
+
+                }
+
+                getCommitResult(dbTransaction, res);
+
+                if (res.metrics != null) {
+                    HashMap<String, String> newMetrics = new HashMap<>(res.metrics);
+                    newMetrics.put("wasted", String.valueOf(wastedTime));
+                    newMetrics.put("retry", String.valueOf(retry - 1));
+                    res.setMetrics(newMetrics);
+                }
+                return res;
+            } catch (Exception e) {
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+
+    public boolean runBuyListingIC3Piece(String PId, String LId, DBTransaction dbTransaction, IC3Piece piece1, TransactionResult res) throws Exception {
+        dbService.ic3PieceBegin(dbTransaction, piece1);
+
+//                Map<String, String> x = read(dbTransaction, "Items", "IId","1000");
+//                write(dbTransaction, "Items", "IId", "1000", x);
+
+        //            R from L where Lid
+        Map<String, String> listing = read(dbTransaction, "Listings", "LId", LId);
+//            Check player exists
+        if (listing.isEmpty()) {
+            log.info("listing does not exists!");
+            return dbService.ic3PieceCommit(dbTransaction, piece1);
+        }
+
+        //            Read from P where pid
+
+        Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+
+//            Check player exists
+        if (player.isEmpty()) {
+            log.info("player does not exists!");
+            return dbService.ic3PieceCommit(dbTransaction, piece1);
+        }
+
+        //            Check players cash for listing
+        if (Double.parseDouble(player.get("PCash")) < Double.parseDouble(listing.get("LPrice"))) {
+            log.info("player does not have enough cash");
+            return dbService.ic3PieceCommit(dbTransaction, piece1);
+        }
+
+
+//            Read from I where LIId
+        Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("LIId"));
+
+        //            Check item exists
+        if (item.isEmpty()) {
+            log.info("item does not exists!");
+            return dbService.ic3PieceCommit(dbTransaction, piece1);
+        }
+
+
+//            Delete from L where LID
+        delete(dbTransaction, "Listings", "LId", LId);
+
+
+//            R from P where ppid
+        String PPId = item.get("IOwner");
+        Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
+        //            Check prevOwner exists
+        if (prevOwner.isEmpty()) {
+            log.info("previous owner does not exists!");
+            return dbService.ic3PieceCommit(dbTransaction, piece1);
+        }
+
+//          W into I where IId = LIId SET IOwner = pid
+        write(dbTransaction, "Items", "IId", listing.get("LIId"), "IOwner", PId);
+
+//           W into P where Pid SET PCash = new Cash
+        String newCash = Double.toString(Double.parseDouble(player.get("PCash")) - Double.parseDouble(listing.get("LPrice")));
+        write(dbTransaction, "Players", "PId", PId, "PCash", newCash);
+
+//           W into P where Pid SET PCash = new Cash
+        String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("PCash")) + Double.parseDouble(listing.get("LPrice")));
+        write(dbTransaction, "Players", "PId", PPId, "PCash", prevOwnerNewCash);
+
+
+//                TODO: implement grpc call
+        boolean pieceResult = dbService.ic3PieceCommit(dbTransaction, piece1);
+        if (pieceResult)
+            res.setMessage(listing.get("LIId"));
+        return pieceResult;
     }
     public TransactionResult buyListingWW(String PId, String LId, String txId) {
 
@@ -1600,6 +2601,9 @@ public class StoredProcedureClient extends Client{
 
         if (dbTransaction != null) {
             try {
+
+//                Map<String, String> x = read(dbTransaction, "Items", "IId","1000");
+//                write(dbTransaction, "Items", "IId", "1000", x);
 
                 //            R from L where Lid
                 lock(dbTransaction, "Listings", "LId", LId, READ_TYPE);
@@ -1811,6 +2815,124 @@ public class StoredProcedureClient extends Client{
         return res;
     }
 
+    public TransactionResult buyListingORDERED(String PId, String LId, String txId) {
+
+        TransactionResult res = new TransactionResult();
+        log.info("buy listing <PID:{}, LID:{}>", PId, LId);
+        DBTransaction dbTransaction = null;
+        try {
+            dbTransaction = dbService.getTransaction(Data.newBuilder().setTransactionId(txId).build());
+            res.setTxId(dbTransaction.getTimestamp());
+        } catch (SQLException e) {
+            return res;
+        }
+        if (dbTransaction != null) {
+
+
+            try {
+                //            R from L where Lid
+                lock(dbTransaction, "Listings", "LId", LId);
+
+
+
+                Map<String, String> listing = read(dbTransaction, "Listings", "LId", LId);
+                lock(dbTransaction, "Items", "IId", listing.get("LIId"));
+
+//            Check player exists
+                if (listing.isEmpty()) {
+                    log.error("listing does not exists!");
+                    commit(dbTransaction);
+                    return res;
+                }
+
+//            Read from I where LIId
+
+
+                Map<String, String> item = read(dbTransaction, "Items", "IId", listing.get("LIId"));
+
+
+                //            Check item exists
+                if (item.isEmpty()) {
+                    log.error("item does not exists!");
+                    commit(dbTransaction);
+                    return res;
+                }
+
+//            Lock Players where pid, ppid
+                String PPId = item.get("IOwner");
+                if (Integer.parseInt(PPId) > Integer.parseInt(PId)) {
+                    lock(dbTransaction, "Players", "PId", PId);
+                    lock(dbTransaction, "Players", "PId", PPId);
+                } else {
+                    lock(dbTransaction, "Players", "PId", PPId);
+                    lock(dbTransaction, "Players", "PId", PId);
+                }
+
+                //            Read from P where pid
+                Map<String, String> player = read(dbTransaction, "Players", "PId", PId);
+//            Check player exists
+                if (player.isEmpty()) {
+                    log.error("player does not exists!");
+                    commit(dbTransaction);
+                    return res;
+                }
+
+                //            Check players cash for listing
+                if (Double.parseDouble(player.get("PCash")) < Double.parseDouble(listing.get("LPrice"))) {
+                    log.error("player does not have enough cash");
+                    commit(dbTransaction);
+                    return res;
+                }
+
+
+                Map<String, String> prevOwner = read(dbTransaction, "Players", "PId", PPId);
+                //            Check prevOwner exists
+                if (prevOwner.isEmpty()) {
+                    log.error("previous owner does not exists!");
+                    commit(dbTransaction);
+                    return res;
+                }
+
+
+//            Delete from L where LID
+                delete(dbTransaction, "Listings", "LId", LId);
+//                if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING)
+//                    unlock(dbTransaction, "Listings", "LId", LId);
+
+//          W into I where IId = LIId SET IOwner = pid
+                write(dbTransaction, "Items", "IId", listing.get("LIId"), "IOwner", PId);
+//                if (!Performance.INTERACTIVE && Performance.PARTIAL_CHOPPING)
+//                    unlock(dbTransaction, "Items", "IId", listing.get("LIId"));
+
+//            delay(3000);
+//           W into P where Pid SET PCash = new Cash
+                String newCash = Double.toString(Double.parseDouble(player.get("PCash")) - Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PId, "PCash", newCash);
+
+//           W into P where Pid SET PCash = new Cash
+                String prevOwnerNewCash = Double.toString(Double.parseDouble(prevOwner.get("PCash")) + Double.parseDouble(listing.get("LPrice")));
+                write(dbTransaction, "Players", "PId", PPId, "PCash", prevOwnerNewCash);
+//            Unlock
+                getCommitResult(dbTransaction, res);
+                res.setMessage(listing.get("LIId"));
+
+//                this.pidAccessed.computeIfPresent(PId, (key, value) -> value + 1);
+//                this.pidAccessed.computeIfPresent(PPId, (key, value) -> value + 1);
+//                this.pidAccessed.putIfAbsent(PId, 1L);
+//                this.pidAccessed.putIfAbsent(PPId, 1L);
+//
+
+
+                return res;
+            } catch (Exception e) {
+                log.error(e.getMessage());
+                rollback(dbTransaction);
+                return res;
+            }
+        }
+        return res;
+    }
+
     private Result unlock(String transactionId, String tableName, String key, String value) throws Exception {
         Data lockData = Data.newBuilder()
                 .setTransactionId(transactionId)
@@ -1849,7 +2971,11 @@ public class StoredProcedureClient extends Client{
 
     private Result commit(DBTransaction tx) {
         Result commitResult = dbService.commitTransaction(tx);
-        log.info("commit {}: {}, {}", tx.getTimestamp(), commitResult.getStatus(), commitResult.getMessage());
+
+        if (!commitResult.getStatus())
+            log.error("commit {}: {}, {}", tx.getTimestamp(), commitResult.getStatus(), commitResult.getMessage());
+        else
+            log.info("commit {}: {}, {}", tx.getTimestamp(), commitResult.getStatus(), commitResult.getMessage());
         return commitResult;
     }
 

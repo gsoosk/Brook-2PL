@@ -1,0 +1,51 @@
+{
+  "transactionName": "payment",
+  "inputs": ["warehouseId", "districtId", "paymentAmount", "customerWarehouseId", "customerDistrictId", "customerId", "txId"],
+  "statements": [
+    {
+      "type": "read",
+      "table": "warehouse",
+      "keys": ["warehouseId"],
+      "output": "W",
+      "commutative": false
+    },
+    {
+      "type": "write",
+      "table": "warehouse",
+      "keys": ["warehouseId", "paymentAmount"],
+      "commutative": false
+    },
+    {
+      "type": "read",
+      "table": "district",
+      "keys": ["warehouseId", "districtId"],
+      "output": "D",
+      "commutative": false
+    },
+    {
+      "type": "write",
+      "table": "district",
+      "keys": ["warehouseId", "districtId", "paymentAmount"],
+      "commutative": false
+    },
+    {
+      "type": "read",
+      "table": "customer",
+      "keys": ["customerWarehouseId", "customerDistrictId", "customerId"],
+      "output": "C",
+      "commutative": false
+    },
+    {
+      "type": "write",
+      "table": "customer",
+      "keys": ["customerWarehouseId", "customerDistrictId", "customerId", "paymentAmount"],
+      "commutative": false
+    },
+    {
+      "type": "insert",
+      "table": "history",
+      "keys": ["warehouseId", "districtId", "customerWarehouseId", "customerDistrictId", "customerId", "paymentAmount", "W.w_name", "D.d_name"],
+      "commutative": true
+    }
+  ]
+}

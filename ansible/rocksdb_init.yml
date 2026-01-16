@@ -4,11 +4,11 @@
   become: true
 
   vars:
-    CHECKPOINT: "rocksdb/checkpoint"
+    CHECKPOINT: "rocksdb/tpcc_checkpoint"
     STORE_INITIALIZER: "app/InitStoreBenchmark.jar"
     TPCC_INITIALIZER: "app/InitTPCCBenchmark.java"
     HOTSPOTS: "rocksdb/hotspots"
-    BENCHMARK: "store"  # tpcc | store
+    BENCHMARK: "tpcc"  # tpcc | store
 
   tasks:
     - name: Create target directory

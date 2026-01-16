@@ -543,6 +543,9 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("committing_time")),
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            if (result.getMetrics().containsKey("wasted"))
+                stats.setWaistedTime(Long.parseLong(result.getMetrics().get("wasted")));
+
 //                            log.info("request successful {}:{}", request.getType(),request.getValues());
         }
     }
@@ -955,7 +958,7 @@ public class Performance {
 //                    pid = Integer.toString(random.nextInt(1, NUM_OF_PLAYERS));
 //                }
 
-                    alreadyBoughtListing.add(lid);
+//                    alreadyBoughtListing.add(lid);
                     tx.put("PId", pid);
                     tx.put("LId", lid);
                     long sendStartMicro = System.nanoTime() / 1000;
@@ -1106,6 +1109,10 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("committing_time")),
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            if (result.getMetrics().containsKey("wasted"))
+                stats.setWaistedTime(Long.parseLong(result.getMetrics().get("wasted")));
+            if (result.getMetrics().containsKey("retry"))
+                stats.setRetryNumber(request.getTransactionId(), (int) Long.parseLong(result.getMetrics().get("retry")));
             log.info("request successful {}:{}", request.getType(),request.getValues());
 
             if (request.getType() == TPCCServerRequest.Type.INTERACTIVE) {
@@ -1196,6 +1203,10 @@ public class Performance {
                     Long.parseLong(result.getMetrics().get("committing_time")),
                     Long.parseLong(result.getMetrics().get("waiting_for_others_time")),
                     Long.parseLong(result.getMetrics().get("rolling_back_time")));
+            if (result.getMetrics().containsKey("wasted"))
+                stats.setWaistedTime(Long.parseLong(result.getMetrics().get("wasted")));
+            if (result.getMetrics().containsKey("retry"))
+                stats.setRetryNumber(request.getTransactionId(), (int) Long.parseLong(result.getMetrics().get("retry")));
 
             // TODO: add number of conflicts and wounds/aborts as ablation study
             log.info("request successful {}", request.getValues());
@@ -1706,7 +1717,7 @@ public class Performance {
             this.finished = System.currentTimeMillis();
             this.windowStart = System.currentTimeMillis();
             this.iteration = new AtomicInteger(0);
-            this.sampling = (int) (numRecords / Math.min(numRecords, 50000));
+            this.sampling = 1000;
             this.latencies = new ConcurrentLinkedQueue<>();
             this.index = new AtomicInteger(0);
             this.startedBytes = new AtomicInteger(0);
@@ -2048,6 +2059,26 @@ public class Performance {
             else if (type == StoreServerRequest.Type.SELL_HOT)
                 sellHotRecordNum.incrementAndGet();
 
+        }
+
+        public void setWaistedTime(long wasted) {
+//            if (warmup.get())
+//                return;
+            this.wastedTimeWork.addAndGet(wasted / 1000);
+            this.usefulWorkTime.addAndGet(-1 * (wasted / 1000));
+        }
+
+        public void setRetryNumber(long c, int retry) {
+            if (warmup.get())
+                return;
+            if (retry == 0)
+                return;
+
+            if (retries.containsKey(c))
+                retries.put(c, retries.get(c) + retry);
+            else {
+                retries.put(c, retry);
+            }
         }
     }
 

@@ -4,19 +4,15 @@ import edgelab.retryFreeDB.init.InitStoreBenchmark;
 import edgelab.retryFreeDB.init.InitTPCCBenchmark;
 import edgelab.retryFreeDB.slwGraph.nodes.TXNode;
 import lombok.extern.slf4j.Slf4j;
-import org.checkerframework.checker.units.qual.A;
-import org.jgrapht.Graph;
-import org.jgrapht.graph.DefaultEdge;
 
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
 import java.util.Map;
-import java.util.stream.Collectors;
 
 
 @Slf4j
-public class TXCheck {
+public class Brook2PLStaticAnalysis {
     private static final SLWGraph slwGraph = new SLWGraph();
     private static String addListing = "TX(PId, IId, price):\n" +
             "X = Read(Item, IId)\n" +
