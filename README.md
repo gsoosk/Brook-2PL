@@ -6,6 +6,23 @@ This repository showcases the Brook-2PL protocol, a deadlock-free Two-Phase Lock
 1. **SLW-Graph** for ensuring deadlock-free execution.
 2. **Partial transaction chopping** for early lock release, improving concurrency.
 
+
+See [our SIGMOD26](https://dl.acm.org/doi/10.1145/3769767) paper for more details on this protocol. 
+Please cite our paper if you used this code.
+```
+@article{habibi2025brook,
+  title={Brook-2PL: Tolerating High Contention Workloads with A Deadlock-Free Two-Phase Locking Protocol},
+  author={Habibi, Farzad and Fang, Juncheng and Lorido-Botran, Tania and Nawab, Faisal},
+  journal={Proceedings of the ACM on Management of Data},
+  volume={3},
+  number={6},
+  pages={1--27},
+  year={2025},
+  publisher={ACM New York, NY, USA}
+}
+```
+
+
 ## Project Structure
 ### Experiment Results
 [Experiment Results](https://github.com/gsoosk/Brook-2PL/tree/main/experiment-results) directory contains all the paper experiment results and their plots. 
